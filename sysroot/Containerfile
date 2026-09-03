@@ -42,7 +42,7 @@ RUN set -eux; apt-get install -y --no-install-recommends \
       mpich libmpich-dev libomp-dev \
       openmpi-bin libopenmpi-dev \
       libelf-dev clang llvm spim \
-      openjdk-21-jdk-headless \
+      openjdk-25-jdk-headless \
       python3 pypy3; \
     update-alternatives --set mpi /usr/bin/mpicc.openmpi || true; \
     update-alternatives --set mpirun /usr/bin/mpirun.openmpi || true; \
