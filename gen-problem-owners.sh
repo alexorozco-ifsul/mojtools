@@ -5,7 +5,7 @@
 #   $CONTESTSDIR/treino/var/problem-owners.json
 #     { generated_at, count, problems: [ {id, repo, prob, title, author, author_norm,
 #                                          owner, collaborators[], collections[], public, html,
-#                                          tl_checksum, public_at, good_langs,
+#                                          tl_checksum, public_at, good_langs, tags[],
 #                                          tl_override} ] }
 # html = ENUNCIADO COMPILADO E SERVÍVEL (json em var/jsons OU var/jsons-private) — vale também
 # p/ problema PRIVADO validado (a pill "sem HTML" do painel deixa de ser sinônimo de privado).
@@ -143,13 +143,19 @@ for repodir in "$MOJ_PROBLEMS_DIR"/*; do
     # mostraria o TL CALIBRADO — número que o juiz não usa — e teria de ler 1400 confs por
     # abertura. ⚠ Espelho de `tl_conf_overrides` (cdmoj lib/tl-store.sh): mesma regex, e o conf
     # é CÓDIGO do autor — parse por sed, NUNCA source. Vai como k=v separado por ';'.
+    # tags do pacote (arquivo `tags`, uma por linha comecando com #). MESMA regra do
+    # gen-problem-json.sh, que ja as poe no json do banco: aqui elas entram no INDICE, que e o que
+    # a Gestao de Problemas lista -- sem isto a busca da tela nao tem como filtrar por tag.
+    tg=""
+    [[ -f "$pdir/tags" ]] && tg="$(grep -E '^#' "$pdir/tags" 2>/dev/null | tr 'A-Z' 'a-z' \
+      | tr -d '\r\t' | sed -E 's/[[:space:]]+$//' | grep -E '^#.+' | LC_ALL=C sort -u | paste -sd, -)"
     ovr=""
     if [[ -f "$pdir/conf" ]] && grep -q TLOVERRIDE "$pdir/conf" 2>/dev/null; then
       ovr="$(sed -nE 's/^[[:space:]]*TLOVERRIDE\[([A-Za-z0-9]{1,16})\]=([0-9]+\.?[0-9]*|\.[0-9]+)[[:space:]]*(#.*)?$/\1=\2/p' \
              "$pdir/conf" 2>/dev/null | sed -E 's/^py[23]=/py=/' | paste -sd';' -)"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$id" "$repo" "$prob" "${author//$'\t'/ }" "$an" "${title//$'\t'/ }" "$pub" "$owner" "$collabs" "$colls" "$cks" "$pat" "$gl" "$htm" "$mlangs" "$ovr" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$id" "$repo" "$prob" "${author//$'\t'/ }" "$an" "${title//$'\t'/ }" "$pub" "$owner" "$collabs" "$colls" "$cks" "$pat" "$gl" "$htm" "$mlangs" "$ovr" "$tg" \
       | tr -d '\r' >> "$tsv"
   done
 done
@@ -175,6 +181,7 @@ jq -Rn --argjson now "$(date +%s 2>/dev/null || echo 0)" --argjson reg "$reg" '
         public_at:((.[11] // "")|if .=="" then null else tonumber end),
         good_langs:((.[12] // "")|split(",")|map(select(length>0))),
         languages:((.[14] // "")|split(",")|map(select(length>0))),
+        tags:((.[16]//"")|split(",")|map(select(length>0))),
         tl_override:(((.[15] // "")|split(";")|map(select(length>0)|split("=")|select(length==2)
                       |{(.[0]):.[1]})|add) // {}) }
     | select(.owner != null) ]
