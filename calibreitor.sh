@@ -75,6 +75,7 @@ trap sai EXIT
 PROBLEMDIR=$(realpath $1)
 
 cd $(dirname $0)
+source ./lang-canon.sh   # extensão -> linguagem canônica (cc/cxx/c++ = cpp, py2/py3 = py)
 
 if [[ ! -e build-and-test.sh ]]; then
   stat build-and-test.sh
@@ -95,6 +96,11 @@ CALTL="$TEMP.tl"
 echo "TL[default]=$CALIBRATIONTL" > "$CALTL"
 export MOJ_TLFILE="$CALTL"       # build-and-test filhos leem daqui (vence tl.<host>/tl)
 export MOJ_CALIBRATING=1         # a CALIBRAÇÃO mede de verdade: TLOVERRIDE não se aplica aqui
+# UM teste por vez, em k CPUs (CPUNEEDED): o TL é medido na MESMA forma em que o julgamento roda
+# cada teste. O `export ALLOWPARALLELTEST=n` de antes era vencido pelo conf do pacote (sourced
+# depois) — a calibração rodava testes em paralelo sem querer (bug (f), 24/09/2026). A env do
+# agente (MOJ_TEST_CPUS/MOJ_CPU_GROUPS, largura k) atravessa; MOJ_PARALLEL é sempre 1 aqui.
+export MOJ_PARALLEL=1
 # temps de um run morto (kill -9) + o vetor estruturado ANTERIOR: sols é sempre da calibração
 # corrente — run abortado deixa sols AUSENTE (o agente não o manda e o servidor preserva/zera
 # pelo checksum), nunca dado velho com cara de novo
@@ -113,17 +119,31 @@ WORSTTIME=0.01
 declare -A WORSTTIMEPERLANG
 declare -A LANGOK          # linguagens que tiveram >=1 solução good Accepted neste host
 
+# VALIDADOR DE ENTRADA (scripts/validator.cpp, testlib): só na calibração COMPLETA (o modo rápido é o da
+# 1ª submissão — não pode atrasar julgamento). A linha vai no MESMO vetor das soluções (category
+# "validator"): o agente sobe o `sols` inteiro e o servidor a separa (lib/calib-expect.sh) — nenhuma
+# mudança no agente. Tem orçamento próprio (testlib/validator-run.sh), então não come o teto da calibração.
+if [[ -z "$CALIBRATE_ONLY_GOOD" ]]; then
+  VJ="$(bash "$PWD/testlib/validator-run.sh" "$PROBLEMDIR" 2>/dev/null)"
+  if jq -e '.category == "validator"' >/dev/null 2>&1 <<<"$VJ"; then
+    printf '%s\n' "$VJ" >> "$TEMP.sols.jsonl"
+    echo "Input validator: $(jq -r '.verdict + (if (.tests|length) > 0 then " (\([.tests[] | select(.code != "OK")] | length) de \(.tests|length) entradas reprovadas)" else "" end)' <<<"$VJ")"
+    jq -r '.tests[] | select(.code != "OK") | "  \(.name): \(.code) \(.msg)"' <<<"$VJ" | head -20
+    echo
+  fi
+fi
+
 echo "AC solutions:"
 for AC in $PROBLEMDIR/sols/good/*; do
   echo "${AC##*/}:"
-  LANG=${AC##*.}
-  # python unificado: sols .py2/.py3 legadas contam como 'py' (chave única na tabela de TL)
-  case "$LANG" in py2|py3) LANG=py;; esac
+  # extensão -> linguagem canônica (lang-canon.sh): py2/py3 legadas = py; cc/cxx/c++ = cpp.
+  # Chave ÚNICA na tabela de TL — e é o canônico que vai ao build-and-test (era a extensão crua).
+  LANG="$(lang_canon "${AC##*.}")"
   [[ ! -n "${WORSTTIMEPERLANG[$LANG]}" ]] && WORSTTIMEPERLANG[$LANG]=0.01
 
   mkfifo $TEMP.coprocout
   export ALLOWPARALLELTEST=n
-  coproc bash build-and-test.sh ${AC##*.} $AC $PROBLEMDIR $ALLOWTLEDURINGCALIBRATION &>$TEMP.coprocout
+  coproc bash build-and-test.sh "$LANG" $AC $PROBLEMDIR $ALLOWTLEDURINGCALIBRATION &>$TEMP.coprocout
   #read -u ${COPROC[0]} T
   exec 7<$TEMP.coprocout
   read -u 7 T
@@ -145,9 +165,12 @@ for AC in $PROBLEMDIR/sols/good/*; do
     LANGOK[$LANG]=1
   else
     # ROBUSTEZ: NÃO aborta a calibração inteira por uma solução (toolchain ausente no
-    # juiz, erro de ambiente, ou solução realmente quebrada). Pula a linguagem e segue —
-    # o juiz reporta a falha ao MOJ (visível sem ssh). Só emite TL p/ linguagens que passaram.
-    echo "$AC got '${A:-<sem veredito>}', was waiting Accepted (linguagem $LANG NÃO calibrada neste host). Check ${T}"
+    # juiz, erro de ambiente, ou solução realmente quebrada). Segue — o juiz reporta a falha
+    # ao MOJ (visível sem ssh). Só emite TL p/ linguagens em que ALGUMA good passou: se outra
+    # good da mesma linguagem foi aceita, a linguagem calibra (a mensagem dizia "NÃO
+    # calibrada" mesmo assim). Quem diz quais linguagens ficaram sem TL é o resumo no fim.
+    # ⚠ "was waiting Accepted" é contrato: o agente do juiz conta as falhas por essa frase.
+    echo "$AC got '${A:-<sem veredito>}', was waiting Accepted. Check ${T}"
   fi
   echo "Verdict: $A"
   echo
@@ -193,6 +216,9 @@ publish_tl "$PROBLEMDIR/tl"
 
 echo "Calibrated TL ($HOSTNAME):"
 tail -n+1 "$TLHOST"
+for t in ${!WORSTTIMEPERLANG[@]}; do
+  [[ -n "${LANGOK[$t]}" ]] || echo "linguagem $t NÃO calibrada neste host (nenhuma solução good $t foi aceita)"
+done
 
 # Modo rápido (calibração sob demanda no modelo cache): só as good bastam p/ o TL.
 # Pular pass/slow/wrong evita rodar dezenas de soluções/linguagens a cada 1ª submissão.
@@ -208,10 +234,9 @@ for OTHERSOL in pass slow wrong; do
   for TLs in $PROBLEMDIR/sols/$OTHERSOL/*; do
     if [[ ! -e $TLs ]]; then echo none; continue;fi
     echo "${TLs##*/}:"
-    LANG="${TLs##*.}"
-    case "$LANG" in py2|py3) LANG=py;; esac
+    LANG="$(lang_canon "${TLs##*.}")"
     mkfifo $TEMP.coproc
-    coproc bash build-and-test.sh ${TLs##*.} $TLs $PROBLEMDIR y >$TEMP.coproc
+    coproc bash build-and-test.sh "$LANG" $TLs $PROBLEMDIR y >$TEMP.coproc
     exec 7<$TEMP.coproc
     read -u 7 T
     tail -f --pid=$COPROC_PID $T/run-trace.log|

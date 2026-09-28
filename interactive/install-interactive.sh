@@ -1,5 +1,5 @@
 #!/bin/bash
-# install-interactive.sh <pkgdir> <arbitro.{cpp,cc,py,sh}> [--score] [--langs "c cpp py sh"]
+# install-interactive.sh <pkgdir> <arbitro.{cpp,cc,cxx,c++,py,sh}> [--score] [--langs "c cpp py sh"]
 #   [--keep-compare]
 # NORMALIZA um problema INTERATIVO do MOJ: instala o árbitro em scripts/, o DRIVER comum
 # (prep.sh+run.sh) em scripts/c/ com symlinks p/ as demais linguagens, o compare genérico
@@ -28,7 +28,7 @@ PKG="$(cd "$PKG" && pwd)"
 [[ -f "$SRC" ]] || { echo "ERRO: árbitro não encontrado: $SRC" >&2; exit 1; }
 [[ -d "$PKG/tests/input" || -f "$PKG/conf" ]] || { echo "ERRO: $PKG não parece um pacote MOJ" >&2; exit 1; }
 ext="${SRC##*.}"
-case "$ext" in cpp|cc|py|sh) ;; *) echo "ERRO: árbitro deve ser .cpp/.cc/.py/.sh (ou adapte scripts/arbitro à mão)" >&2; exit 1;; esac
+case "$ext" in cpp|cc|cxx|c++|py|sh) ;; *) echo "ERRO: árbitro deve ser .cpp/.cc/.cxx/.c++/.py/.sh (ou adapte scripts/arbitro à mão)" >&2; exit 1;; esac
 
 # COMPOSIÇÃO: o interativo OCUPA a execução por linguagem (scripts/<lang> vira symlink p/ c)
 # e tem compare próprio — NÃO compõe com submissão-de-função nem com checker testlib
@@ -42,7 +42,7 @@ fi
 
 mkdir -p "$PKG/scripts/c"
 
-# árbitro no nível de scripts/ (o prep.sh procura arbitro.{cpp,cc,py,sh} lá)
+# árbitro no nível de scripts/ (o prep.sh procura arbitro.{cpp,cc,cxx,c++,py,sh} lá)
 [[ "$(readlink -f "$SRC")" != "$(readlink -f "$PKG/scripts/arbitro.$ext" 2>/dev/null)" ]] \
   && cp "$SRC" "$PKG/scripts/arbitro.$ext"
 
@@ -82,8 +82,14 @@ if (( SCORE )); then
   chmod +x "$PKG/scripts/summary.sh"
 fi
 
-# conf: só AVISA (não edita) sobre o que interativo costuma precisar
+# conf: interativo NÃO tem exemplo de entrada/saída (a "entrada" é o cenário secreto do árbitro):
+# grava SAMPLE=no (o exemplo vai no texto, como transcrição da conversa — docs/problema-interativo.md).
+# O resto só AVISA (não edita).
 conf="$PKG/conf"
+if ! grep -qE '^[[:space:]]*SAMPLE[[:space:]]*=' "$conf" 2>/dev/null; then
+  { [[ -s "$conf" && -n "$(tail -c1 "$conf")" ]] && printf '\n'; printf 'SAMPLE=no\n'; } >> "$conf"
+  echo "conf: SAMPLE=no (interativo não mostra caixa de exemplo; ponha o exemplo no texto, seção ## Exemplo)"
+fi
 grep -q 'ULIMITS\[-u\]' "$conf" 2>/dev/null || \
   echo "aviso: conf sem ULIMITS[-u] — interativo roda 2+ processos; recomende ULIMITS[-u]=10000"
 grep -q 'TLMOD\[calibrafactor\]' "$conf" 2>/dev/null || \

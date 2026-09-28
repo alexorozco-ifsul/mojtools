@@ -101,6 +101,34 @@ Repare em duas coisas que **não** estão no arquivo:
   `% Soma` na primeira linha, o renderizador vai apagar (é um formato legado).
 - **Não há exemplo.** Os exemplos são montados a partir dos arquivos de teste, no passo seguinte, e
   injetados no fim do enunciado. Se você escrever um exemplo à mão aqui, ele vai aparecer duas vezes.
+  A exceção é o problema **sem exemplo** (`SAMPLE=no`, fim do Passo 3): nele o exemplo vai no texto.
+
+#### Enunciado em outros idiomas (opcional)
+
+O português fica em `docs/enunciado.md` e é obrigatório. Para oferecer o problema em inglês ou
+espanhol, escreva a tradução ao lado, com o código do idioma no nome:
+
+```sh
+cat > docs/enunciado.en.md <<'EOF'
+Given two integers, print their sum.
+
+## Input
+
+The input has two integers $a$ and $b$ ($0 \le a, b \le 1000$), one per line.
+
+## Output
+
+Print one integer: the sum of $a$ and $b$.
+EOF
+```
+
+Regras: `en` e `es` são os idiomas aceitos; só markdown. A tradução tem as mesmas seções
+obrigatórias (`## Input`/`## Output`, ou `## Entrada`/`## Salida`). A explicação de um exemplo
+traduzida vai em `docs/notes/<sample>.en.md`; sem ela, o exemplo mostra a explicação em
+português. O editorial traduzido vai em `docs/solucao.en.md`. O título da tradução fica no
+metadado (`titles`; pela CLI: `moj title . --lang en "Sum"`). Os exemplos aparecem em todos os
+idiomas, com os rótulos do idioma. O formato completo está em `cdmoj/docs/PACOTE.md`, seção
+"Idiomas".
 
 ### Passo 3: criar os exemplos
 
@@ -115,6 +143,23 @@ printf '5\n'    > tests/output/sample1
 O nome do arquivo de entrada e o do arquivo de saída têm que ser **iguais**. A validação confere isso
 nos dois sentidos.
 
+#### Problema sem exemplo: `SAMPLE=no`
+
+Em alguns problemas, entrada e saída de exemplo não fazem sentido para o aluno: submissão de
+função (a entrada é o formato interno do driver), problema interativo (a entrada é o cenário
+secreto do árbitro) e problema com linguagem própria, entre outros. Nesses casos:
+
+1. Não crie `tests/input/sample*`.
+2. Ponha a linha `SAMPLE=no` no `conf`. No editor web, é a opção **Sem exemplos** da aba
+   **Limites**. O `moj interactive` já grava essa linha.
+3. Explique o exemplo no texto do enunciado, numa seção `## Exemplo` (uma figura, uma chamada da
+   função, a transcrição da conversa com o árbitro).
+
+Com `SAMPLE=no`, o enunciado não mostra a caixa de exemplos e não há exemplo para baixar, nem se
+existirem arquivos `sample*` (eles continuam corrigindo, como qualquer teste). A validação exige
+uma das duas coisas: pelo menos um `sample*`, ou `SAMPLE=no`. **Teste oculto nunca aparece como
+exemplo.** A linha `SAMPLE` não entra no tl-checksum: marcar ou desmarcar não pede recalibração.
+
 ### Passo 4: criar os testes ocultos
 
 Qualquer nome que não comece com `sample` é um teste oculto: corrige, mas o aluno não vê.
@@ -126,10 +171,22 @@ printf '1000\n1000\n' > tests/input/test-002
 printf '2000\n'       > tests/output/test-002
 ```
 
+#### Validador de entrada (recomendado)
+
+Um validador confere se cada teste segue o formato e os limites do enunciado. Escreva
+`scripts/validator.cpp` com a testlib (`registerValidation`, `inf.readInt(1, 1000, "N")`, …) e rode:
+
+```sh
+bash mojtools/testlib/install-validator.sh <pacote> validator.cpp   # ou: moj validator . validator.cpp
+```
+
+Ele compila com o seu `g++` e mostra, por entrada, ✓ ou a mensagem da testlib. A calibração completa
+roda o mesmo validador no juiz. Guia: **[docs/validador-testlib.md](docs/validador-testlib.md)**.
+
 ### Passo 5: escrever a solução de referência
 
 Pelo menos **uma** solução correta em `sols/good/` é obrigatória. **A extensão do arquivo é o que
-diz a linguagem.**
+diz a linguagem.** C++ aceita `.cpp`, `.cc`, `.cxx` e `.c++`. O julgador trata as quatro como `cpp`.
 
 ```sh
 cat > sols/good/sol.c <<'EOF'
@@ -195,7 +252,8 @@ bash ../mojtools/validate-problem.sh . soma#soma
 ```
 
 O comando sai com 0 se passou, e escreve um relatório em `run/validation/<id>.json` dizendo, item a
-item, o que passou e o que não passou. Ele confere: autor, enunciado, as seções `## Entrada` e
+item, o que passou e o que não passou. Ele confere: autor, enunciado (e cada tradução
+`docs/enunciado.<lang>.md`, com as mesmas regras), as seções `## Entrada` e
 `## Saída`, se o pandoc renderiza, se há exemplo, se todo teste está pareado, se há solução `good`,
 e se a `good` é aceita.
 
@@ -280,6 +338,11 @@ mesmo (`aula_*` casa `aula_2_1`) e **todo teste precisa cair num grupo** — o `
 confere (check `score_file_sane`). Quem interpreta o arquivo é o `score-summary.sh`, sozinho, sem
 você precisar chamar nada.
 
+Os grupos decidem só a **nota**. O **veredito** que o aluno recebe é o mesmo que os testes dariam
+sem grupos — o pior teste: um grupo que caiu por estouro de tempo sai **Time Limit Exceeded** (com a
+nota dos grupos que passaram), não "resposta errada". Um grupo de peso 0 sem nenhum teste (ex.:
+`sample* - 0 pontos` num problema `SAMPLE=no`) não derruba nada.
+
 ### Checker (quando há mais de uma resposta certa)
 
 Se a resposta não é única (tolerância de ponto flutuante, várias ordens válidas, qualquer caminho
@@ -343,6 +406,17 @@ moj fn <dir> [--langs c,cpp,py,java,rs]    # ou: bash fn/install-fn.sh <dir> [--
 Guia de autoria (anatomia por linguagem, boas práticas, erros comuns):
 **[docs/submissao-de-funcao.md](docs/submissao-de-funcao.md)**.
 
+### Problema paralelo (OpenMP / MPI)
+
+Quando cada teste precisa de **várias CPUs** (OpenMP, MPI, pthreads), declare no `conf`
+**`CPUNEEDED=<k>`** — o juiz junta k slots para cada teste, mede o tempo-limite **com k CPUs, um
+teste por vez**, e entrega k à jaula por `MOJ_TEST_CPUS`/`OMP_NUM_THREADS` (o `run.sh` de MPI faz
+`mpirun -np "$MOJ_TEST_CPUS"`; nunca um número fixo). `SAMENUMA=y` pede as k CPUs no mesmo nó NUMA.
+Templates prontos: `paralelo-openmp` e `paralelo-mpi` (seletor do editor web). Guia:
+**[docs/problema-paralelo.md](docs/problema-paralelo.md)**. E, para QUALQUER problema, o juiz
+pode rodar **vários testes ao mesmo tempo** quando tem CPU ociosa (`ALLOWPARALLELTEST`,
+`MAXPARALLELTESTS`) — a mesma seção do guia explica o que isso muda (nada no tempo-limite).
+
 ### Outros ajustes de correção
 
 Proibir uma função da biblioteca para forçar a implementação na mão, comparador com tolerância
@@ -396,7 +470,9 @@ calibrar e para pontuação por grupos).
 
 - a **primeira linha** do stdout é o **diretório de trabalho**, onde ficam todos os artefatos;
 - a **última linha** do stdout é o **veredito**, com a nota embutida (`Accepted,100p`,
-  `Wrong Answer,40p`).
+  `Wrong Answer,40p`). Em problema **pontuado por grupos** vem o detalhe dos grupos depois da nota:
+  `Time Limit Exceeded,30p. Pontos | 30 | 0 | quantitativos TLE(2) AC(8)` (seção do
+  `score-summary.sh`, abaixo).
 
 Artefatos que ficam no diretório de trabalho (ele **não** é apagado; quem chamou é que recolhe):
 
@@ -422,6 +498,24 @@ linguagem específica), `MOJ_PROBLEM_ID`, **`MOJ_TLFILE`** (aponta uma tabela de
 vence `tl.<máquina>`/`tl` — é como o calibreitor isola os filhos dele) e **`MOJ_CALIBRATING`**
 (setado, desliga o `TLOVERRIDE` do conf: durante a calibração se mede de verdade).
 
+**Paralelismo dos testes** (24/09/2026): cada teste roda em **k CPUs** (`CPUNEEDED` do conf, default 1)
+e até **P testes rodam ao mesmo tempo**. Quem decide P e quais CPUs é o **agente do juiz**, pelo
+ambiente — e o ambiente **vence** o conf e o `nproc`:
+
+| Variável | Significado |
+|---|---|
+| `MOJ_TEST_CPUS=k` | CPUs por teste que este julgamento ganhou (normalmente = `CPUNEEDED`) |
+| `MOJ_PARALLEL=P` | testes ao mesmo tempo (P workers). O calibreitor exporta `1` |
+| `MOJ_CPU_GROUPS="0,1\|2,3\|…"` | P grupos de k CPUs; o worker g pina a jaula no grupo g (`cage-run -C`) |
+| `MOJ_RELEASE_FILE=<arq>` | o worker que fica sem teste anota o índice do grupo aqui (append-only); o agente devolve esses slots antes do fim do job. Antes do **rerun serial de TLE** todos os grupos ≥ 1 são liberados e o harness se re-pina no grupo 0 |
+
+Sem essas variáveis (rodando à mão, `moj test --run`, agente antigo): `P = min(nproc/k,
+MAXPARALLELTESTS)`, `ALLOWPARALLELTEST=n` força `P = 1`, e nada é pinado — a semântica de sempre,
+agora com teto (`MAXPARALLELTESTS` não passa mais de `nproc/k`). Os P workers consomem a fila de
+testes com uma reivindicação atômica por teste (`mkdir`), todo worker confere o `STOPWHEN_*`/`RUNALL`
+antes de pegar o próximo, e o `report.env` leva `NPROCINFO=P` e `CPUNEEDEDINFO=k` (o report mostra
+"P teste(s) ao mesmo tempo × k CPU(s) por teste"). Teste: `make test-parallel`.
+
 Lê do `conf` do problema: todas as chaves de limite (ver `cdmoj/docs/PACOTE.md`).
 
 ### `cage-run.sh`: a jaula
@@ -435,7 +529,7 @@ compilar e uma vez por teste.
 
 ```
 cage-run.sh -d <dir> -i <entrada> -o <saída> -s <log-stderr> -t <log-tempo> -r <script> -T <limite> -B <arq>
-            [-w <dir-rw>] [-b <bind>]... [-R <rootfs>] [-M <MB>] [-S <cpus> -U <user>]
+            [-w <dir-rw>] [-b <bind>]... [-R <rootfs>] [-M <MB>] [-C <cpus>] [-S <cpus> -U <user>]
 ```
 
 | Flag | O que faz |
@@ -448,7 +542,8 @@ cage-run.sh -d <dir> -i <entrada> -o <saída> -s <log-stderr> -t <log-tempo> -r 
 | `-M` | limite de memória, em MB |
 | `-R` | a raiz do sistema de arquivos da jaula (o rootfs). Também vem da variável `CAGE_ROOT` |
 | `-b` | um bind extra para dentro da jaula (usado pelos `prep.sh` das linguagens) |
-| `-S` / `-U` | fixa CPU e usuário (só como root; os dois têm que vir juntos) |
+| `-C` | lista de CPUs (formato do `taskset`: `0,1` ou `4-7`) onde a jaula roda **pinada** (`taskset -c` antes do `bwrap`, só sem root). É como cada teste recebe o seu grupo de k CPUs; dentro da jaula `nproc` = k |
+| `-S` / `-U` | fixa CPU e usuário (só como root; os dois têm que vir juntos — e aí o `-C` é ignorado) |
 
 O `/etc` entra inteiro na jaula, mas com **máscaras**: `shadow`, `sudoers`, chaves de `ssh` e afins
 são zerados, e `passwd`/`group` viram arquivos sintéticos de uma linha. Detalhes em
@@ -461,13 +556,23 @@ calibreitor.sh <pacote>
 ```
 
 Roda cada solução de `sols/good/`, pega o pior tempo por linguagem, multiplica pelo
-`TLMOD[calibrafactor]` (1.35 por padrão) e grava `tl.<máquina>` e `tl` dentro do pacote. Só emite
+`TLMOD[calibrafactor]` (1.35 por padrão) e grava `tl.<máquina>` e `tl` dentro do pacote. Roda
+**um teste por vez** (exporta `MOJ_PARALLEL=1`; o `ALLOWPARALLELTEST=n` de antes era vencido pelo
+conf do pacote), cada um com as **k CPUs** do problema (`CPUNEEDED`; o agente dá o grupo de CPUs
+via `MOJ_CPU_GROUPS`) — o tempo-limite é medido na MESMA forma em que o julgamento roda cada
+teste. Só emite
 tempo-limite para linguagem que teve pelo menos uma solução `good` **aceita** naquela máquina — com
 `ALLOWTLEDURINGCALIBRATION=y` no conf, um **TLE** também conta como calibrada (para a `good` que
 vive no limite de propósito). A conta exata é `calibrafactor × pior_tempo_AC + 0,02`.
 
 Depois, roda as soluções de `pass/`, `slow/` e `wrong/` para conferência (o `CALIBRATE_ONLY_GOOD=1`
-pula essa parte, e é o que o agente do juiz usa quando está com pressa).
+pula essa parte, e é o que o agente do juiz usa quando está com pressa). O calibreitor só roda e
+registra; quem decide se cada solução fez o que a categoria pede é o **servidor**
+(`cdmoj/server/api/v1/lib/calib-expect.sh`, tabela em `cdmoj/docs/PACOTE.md` §10).
+
+Antes das soluções, a calibração completa roda o **validador de entrada** do pacote
+(`scripts/validator.cpp`, via `testlib/validator-run.sh`) e anexa o resultado ao `.calib-sols.json`
+como uma entrada `category:"validator"` (o modo `CALIBRATE_ONLY_GOOD` não roda o validador).
 
 Grava também um `report.html` por solução em `.calib-reports/`, que o agente sobe para o servidor,
 e o vetor **ESTRUTURADO** da calibração em **`.calib-sols.json`**: por solução executada,
@@ -514,6 +619,10 @@ Variáveis: `VALIDATE_RUN_SOLS=0` pula a execução das soluções; `RUNDIR` diz
 
 ### `gen-problem-json.sh`: gerar o índice do aluno
 
+Além de título/autor/TL/tags/coleções/idiomas/exemplos, o json leva **`cpu_needed`** e **`same_numa`**
+(o `CPUNEEDED`/`SAMENUMA` do conf, lidos por sed): é por ele que o checklist pré-prova do contest sabe
+que um problema paralelo precisa de juiz com k CPUs, sem abrir pacote.
+
 ```
 gen-problem-json.sh <pacote> [<id>]
 ```
@@ -522,12 +631,21 @@ Lê o pacote e escreve `contests/treino/var/jsons/<id>.json`, que é o que o fro
 
 ```json
 { "id": "...", "title": "...", "author": "...", "time_limits": {...}, "tags": [...],
-  "collections": [...], "languages": [...], "statement_html_b64": "..." }
+  "collections": [...], "languages": [...], "statement_html_b64": "...",
+  "statement_langs": ["pt", "en"], "statements": { "en": { "title": "...", "html_b64": "..." } } }
 ```
 
 Os **exemplos** vêm sempre dos arquivos de teste (`tests/input/sample*`, na ordem), nunca do texto do
 enunciado, e são injetados no HTML. As explicações de cada exemplo vêm de **`docs/notes/<sample>.md`** (markdown, pareado pelo NOME do teste — é o formato de autoria; o antigo `docs/sample-notes.json`, por índice, só é lido como legado).
 O editorial (`docs/solucao.md`) é **ignorado** de propósito: ele não pode chegar ao aluno.
+
+**Idiomas.** O script renderiza um HTML por idioma do pacote (`docs/enunciado.<lang>.md`, ver
+`statement-langs.sh`): o português vai em `title`/`statement_html_b64`, como sempre; cada tradução
+vai em `statements.<lang>` com o título de `titles` do meta (ou o título em português). Os exemplos
+saem em cada idioma com os rótulos do idioma, e a explicação traduzida (`docs/notes/<sample>.<lang>.md`)
+cai na explicação em português quando falta. `statement_langs` lista os idiomas servidos. O HTML dos
+exemplos é o de **`stmt_samples_html`** (`statement-langs.sh`) — o mesmo que o "Pré-visualizar" do
+editor usa.
 
 Os tempos-limite vêm do store dos juízes (`run/tl/<id>.json`) e são o **máximo entre as máquinas**,
 mas só valem se o checksum do pacote ainda bate. Se o pacote mudou e ninguém recalibrou, cai no
@@ -552,12 +670,14 @@ Se o problema é privado, o JSON vai só para `jsons-private/`, e o do `jsons/` 
 ### `render-statement.sh`: renderizar o enunciado
 
 ```
-render-statement.sh <arquivo-do-enunciado> [formato] [html-dos-exemplos] [título]
+render-statement.sh <arquivo-do-enunciado> [formato] [html-dos-exemplos] [título] [idioma]
 ```
 
 Escreve o HTML completo no stdout. Usa pandoc com `--mathml` (a matemática vira MathML de verdade) e
 `--embed-resources` (as imagens entram embutidas, o HTML é autocontido). Injeta o `<h1>` a partir do
-**título**, que é um argumento, e remove um `% Título` legado da primeira linha. Blocos de código
+**título**, que é um argumento, e remove um `% Título` legado da primeira linha. O 5º argumento é o
+**idioma** (`pt`, `en`, `es`; default `pt`) e só define o `<html lang>` — a tradução mora no arquivo
+que você passa e os rótulos dos exemplos vêm prontos no HTML dos exemplos. Blocos de código
 ` ```{.graph} ` (fonte graphviz DOT) viram **SVG** via `dot` (lua-filter `graphviz.lua`) —
 ver **[docs/enunciado-grafos.md](docs/enunciado-grafos.md)**.
 
@@ -576,30 +696,65 @@ Recebe o diretório que o `build-and-test.sh` imprimiu na primeira linha e gera 
 veredito, barra de tempo de cada teste em relação ao limite, pico de memória, e o diff colorido entre
 o que saiu e o que era esperado. O HTML é autocontido.
 
+A barra de tempo tem três cores, com legenda própria:
+- **azul**: dentro do limite;
+- **amarelo**: acima do limite, mas o teste não é TLE, porque passou pela tolerância (`TL_DRIFT` do
+  `report.env`, que o `build-and-test.sh` grava a partir de `TLMOD[<lang>.drift]` › `TLMOD[default.drift]`
+  › 0);
+- **a cor de TLE do mapa de testes**: estourou.
+
+O vermelho do Wrong Answer não aparece no gráfico: antes um AC dentro da tolerância saía vermelho (relato
+do Daniel Saad, 24/09/2026).
+
 Você não costuma chamar este script: o `build-and-test.sh` já o chama no fim.
 
-### `tl-checksum.sh`: o checksum que invalida o tempo-limite
+### `tl-checksum.sh`: os dois carimbos do pacote
 
 ```
-tl-checksum.sh <pacote>      # imprime 16 dígitos hexadecimais
+tl-checksum.sh <pacote>              # 16 dígitos hex — o carimbo ESTREITO (tl_checksum)
+tl-checksum.sh --all-sols <pacote>   # 16 dígitos hex — a VERSÃO do pacote (pkg_version)
 ```
 
-O checksum cobre **o que pode mudar o tempo de execução OU o veredicto**: o `conf`, os
-`tests/{input,output,score}`, as `sols/good/*` e o `scripts/*` (conteúdo **e** bit de execução).
+O **estreito** cobre *o que pode mudar o tempo de execução ou o veredicto*: o `conf`, os
+`tests/{input,output,score}`, as `sols/good/*` e o `scripts/*` (conteúdo **e** bit de execução),
+**menos** `scripts/validator.cpp` (o validador de entrada não julga solução; ele entra só na versão do
+pacote, abaixo).
 Em `tests/output`, arquivo **vazio conta como ausente** — sem isso um problema interativo (que não
 tem saída esperada) pedia recalibração para sempre.
 Não cobre o enunciado, as tags nem o autor.
 
 É por isso que **corrigir um typo no enunciado não força recalibração**, mas trocar um teste (entrada
-ou saída esperada), o `tests/score`, uma solução `good`, o `conf` ou um script força — o juiz usa
-este checksum para saber quando **re-baixar o pacote**, então tudo que muda o julgamento tem de
-entrar nele (fora dele, um `tests/score` corrigido nunca chegava ao juiz).
+ou saída esperada), o `tests/score`, uma solução `good`, o `conf` ou um script força.
+
+Com **`--all-sols`** entram também as `sols/{pass,slow,wrong,upcoming}`, e o resultado é a **versão
+do pacote**: é ela que o servidor devolve ao juiz em `/judge/package-meta`, e é comparando-a que o
+agente decide **re-baixar o pacote**. Por que dois carimbos: o estreito também é o que diz se o TL
+medido ainda vale, então ele não pode mudar quando o autor salva uma solução `wrong` (o tempo-limite
+sumiria da prova); mas o juiz precisa enxergar QUALQUER mudança em `sols/`, senão o "Calibrar" roda
+o `sols/` do cache velho — julgando solução já apagada e ignorando a recém-escrita (2026-09-20).
 
 ### `score-summary.sh`: pontuação por grupos
 
 Não é um comando: é um trecho que o `build-and-test.sh` carrega sozinho quando o pacote tem
 `tests/score` (e não tem um `scripts/summary.sh` próprio). Interpreta os grupos, aplica o tudo ou nada
 por grupo, soma os pesos e reescreve o veredito com a nota.
+
+O veredito é o do **pior teste**, como no problema sem grupos (a mesma conta do `build-and-test.sh`:
+`SMALLRESP` → `VERDICT_CANON`); os grupos decidem só a nota. A última linha fica
+`<veredito canônico>,<pontos>p. Pontos | <por grupo> | [quantitativos <código>(<n>) …]`:
+
+| Situação | Última linha (exemplo) |
+|---|---|
+| todos os grupos aceitos | `Accepted,100p. Pontos \| 30 \| 70 \|` |
+| um grupo caiu; pior teste WA / TLE / MLE / RE | `Wrong Answer,30p. …` · `Time Limit Exceeded,30p. …` · `Memory Limit Exceeded,30p. …` · `Runtime Error,30p. …` |
+| pacote quebrado: teste sem grupo, ou grupo de peso>0 sem teste com todos os testes aceitos | `Judge Error,0p. teste 'x' sem grupo em tests/score (erro do pacote)` |
+
+O rótulo é o **canônico** (nunca `Possible Runtime Error, non-zero return`, que tem vírgula) e nunca
+tem dígito seguido de `p`: o primeiro `NNp` da linha é a nota, e é assim que o servidor a lê. Até
+24/09/2026 toda falha de grupo saía `Wrong,<n>p` — o aluno lia "resposta errada" num TLE. O
+histórico gravado antes disso fica como está (o servidor lê `Wrong` como Wrong Answer). Pacote
+quebrado é **Judge Error com nota 0**: erro do pacote, não do aluno (o `validate-problem.sh` já barra
+os dois casos). Teste: `make test-score` (`test-score-summary.sh`).
 
 ### `gen-problem-owners.sh`: o índice de donos (roda no servidor)
 
@@ -680,6 +835,11 @@ As 17 linguagens de hoje: `apl`, `c`, `cpp`, `cs`, `go`, `hs`, `java`, `js`, `kt
 > **legadas**: o julgador as normaliza para `py` sozinho. O `lang/py/compile.sh` faz uma checagem de
 > sintaxe, então erro de sintaxe em Python vira **Compilation Error**, e não Runtime Error.
 
+> **C++ é uma linguagem só: `cpp`**, com quatro extensões: `.cpp`, `.cc`, `.cxx` e `.c++`. A tabela
+> extensão → linguagem tem uma fonte só: `lang-canon.sh`. O `build-and-test.sh` copia o arquivo
+> para a jaula com a extensão canônica (`sol.cc` vira `sol.cpp`). Assim o `lang/cpp/compile.sh` e
+> os `scripts/cpp/compile.sh` dos pacotes, que procuram `*.cpp`, funcionam sem mudança.
+
 ### `lang/<lang>/compile.sh`
 
 Roda **dentro da jaula**, num diretório de escrita (`/tmp/rwdir`) que já tem o fonte do aluno.
@@ -709,7 +869,7 @@ em `/tmp/out`.
 ```sh
 exec &>/tmp/stderrlog
 cd /tmp/dir
-source binfile.sh                  # define BIN, MOJ_MEMLIMITMB, MOJ_STACKKB
+source binfile.sh                  # define BIN, MOJ_MEMLIMITMB, MOJ_STACKKB; exporta MOJ_TEST_CPUS, OMP_NUM_THREADS
 exec ./$BIN < /tmp/in > /tmp/out
 ```
 
@@ -720,6 +880,12 @@ O `binfile.sh` **não é um arquivo deste repositório**: ele é gerado em tempo
 ```sh
 exec java -Xmx${MOJ_MEMLIMITMB:-500}m -Xss${MOJ_STACKKB:-131072}k $(basename $BIN .class) < /tmp/in > /tmp/out
 ```
+
+E é por ele que um problema paralelo sabe **quantas CPUs o teste tem**: `MOJ_TEST_CPUS` (= `CPUNEEDED`
+do conf, ou o que o agente deu) e `OMP_NUM_THREADS` com o mesmo valor, já **exportados** — um
+programa OpenMP se dimensiona sozinho, e o `run.sh` de MPI faz `mpirun -np "$MOJ_TEST_CPUS"`
+(template `paralelo-mpi`). Com k = 1 os dois valem 1: um OpenMP num slot de uma CPU não fica criando
+threads que só se revezam.
 
 ### `lang/<lang>/prep.sh`
 
@@ -813,8 +979,10 @@ juiz.
 - **[SANDBOX.md](SANDBOX.md)**: como a jaula funciona, como escolher a raiz, o endurecimento.
 - **[docs/correcao-especial.md](docs/correcao-especial.md)**: `scripts/` por problema.
 - **[docs/checker-testlib.md](docs/checker-testlib.md)**: escrever um checker.
+- **[docs/validador-testlib.md](docs/validador-testlib.md)**: escrever um validador de entrada.
 - **[docs/problema-interativo.md](docs/problema-interativo.md)**: escrever um problema interativo.
 - **[docs/submissao-de-funcao.md](docs/submissao-de-funcao.md)**: problema de submissão de função.
+- **[docs/problema-paralelo.md](docs/problema-paralelo.md)**: problema paralelo (OpenMP/MPI): `CPUNEEDED`, `SAMENUMA`, como o TL é medido, o que o `run.sh` deve fazer.
 - **[docs/enunciado-grafos.md](docs/enunciado-grafos.md)**: desenhar grafo no enunciado (graphviz).
 - **`cdmoj/docs/PACOTE.md`** (no repositório `cdmoj`): o **formato do pacote**, orgs, coleções e
   metadados. É a referência.
@@ -827,3 +995,17 @@ make check          # bash -n em todos os .sh
 ```
 
 Licença: GPLv3 ou posterior. Ver [LICENSE](LICENSE).
+
+### Exemplos como dado
+
+`gen-problem-json.sh` grava no json servível o campo `samples` (`[{name, input, output}]`), com os mesmos
+exemplos que o enunciado mostra (`stmt_sample_names`, em `statement-langs.sh`). Um teste oculto nunca
+entra nesse campo. O servidor serve esse campo em `/treino/problem` e `/contest/samples`; a CLI
+`moj-comp samples` e o botão **Exemplos** da web leem dali. Tetos: `STMT_SAMPLE_MAX_BYTES` (256 KB)
+trunca o bloco no HTML com o aviso "Exemplo grande"; `STMT_SAMPLE_JSON_MAX_BYTES` (4 MB) troca o dado
+por `{name, size, too_big:true}`.
+
+### Tamanho do report
+
+`gen-report.sh` corta cada bloco embutido (entrada, stderr, diff, logs) em `REPORT_MAX_BYTES`
+(64 KB) além do corte por linhas — uma linha de 1 MB não entra inteira.
