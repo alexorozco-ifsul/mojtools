@@ -28,9 +28,16 @@ wb="${1:?uso: gen-report.sh <workdirbase>}"
 # defaults — tolera report.env incompleto (ex.: regeneração manual)
 PROBLEM="" LANGUAGE="" SRCBASENAME="" TL_LANG="1" SMALLRESP="" FINALRESP=""
 CORRECT=0 TOTALTESTS=0 TOTALTIME=0 PROBLEMTEMPLATEDIR="" HOSTBT="" STARTDATE=""
-RUNALL="" NPROCINFO="" REPORTMODE="normal" TOOLCHAIN_ROOT="" TOOLCHAIN_VER=""
-VERDICT_CANON="" SCORE="" SCORE_MAX="" SCORE_KIND="" SCORE_GROUPS=""
+RUNALL="" NPROCINFO="" CPUNEEDEDINFO="" CPUGROUPSINFO="" REPORTMODE="normal" TOOLCHAIN_ROOT="" TOOLCHAIN_VER=""
+VERDICT_CANON="" SCORE="" SCORE_MAX="" SCORE_KIND="" SCORE_GROUPS="" TL_DRIFT=""
 [[ -e "$wb/report.env" ]] && source "$wb/report.env"
+# tolerância (drift) acima do TL antes de TLE (build-and-test.sh: TLMOD[<lang>.drift] › TLMOD[default.drift]).
+# Vazio = report.env de um build-and-test antigo: sem o valor, mas o amarelo segue valendo pelo veredicto.
+[[ "$TL_DRIFT" =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || TL_DRIFT=""
+# Teto por BYTES de cada bloco embutido (entrada do teste, stderr, diff, logs) — o corte por
+# linhas não bastava: uma linha de 1,2 MB entrava inteira e havia report de 17 MB (LATAM 2026:
+# 38 GB de mojlog). 64 KB por bloco preserva o que o time precisa ler; o resto vira o aviso.
+: "${REPORT_MAX_BYTES:=65536}"
 
 declare -A VERDICT
 [[ -e "$wb/log.verdictall" ]] && source "$wb/log.verdictall"
@@ -79,32 +86,46 @@ exectime_of(){ local f="$wb/$1-log.timelog"
 mem_of(){ local f="$wb/$1-log.timelog"
   [[ -s "$f" ]] && grep -m1 '^res' "$f" 2>/dev/null | awk '{print $NF}'; }
 mem_fmt(){ awk -v k="${1:-0}" 'BEGIN{ if(k+0<=0){print "—"} else if(k+0<1024){printf "%d KB",k} else {printf "%.1f MB",k/1024} }'; }
+# segundos p/ exibição: zero à esquerda (o bc imprime ".82") e sem zeros sobrando ("0.8200" -> "0.82")
+secs(){ awk -v t="$1" 'BEGIN{ printf "%g", t+0 }'; }
+# TEMPO × LIMITE de um teste (relato do Daniel Saad, 2026-09-24: AC com barra VERMELHA — a mesma cor do
+# Wrong Answer da legenda — porque passou do limite dentro da tolerância). A cor sai do VEREDICTO:
+#   over = estourou (o teste é TLE) · drift = acima do TL mas NÃO é TLE: aceito pela tolerância · ok
+tclass(){ local t="$1" v="$2"
+  [[ "$v" == TLE ]] && { echo over; return; }
+  awk -v t="$t" -v tl="${TL_LANG:-0}" 'BEGIN{ print ((tl+0 > 0 && t+0 > tl+0) ? "drift" : "ok") }'; }
+TCOL_OK="#1e57c4"; TCOL_DRIFT="#eab308"   # azul / amarelo; o estouro usa a cor de TLE da paleta (vcolor)
+
 # largura em % do tempo relativo ao TL (entre 2 e 100); vazio -> 0
 pct_of(){ local t="$1" tl="${TL_LANG:-1}"; [[ -z "$t" ]] && { echo 0; return; }
   awk -v t="$t" -v tl="$tl" 'BEGIN{ if(tl+0<=0)tl=1; v=(t+0)/tl*100;
     if(v>100)v=100; if(v<2)v=2; printf "%.1f", v }' 2>/dev/null || echo 2; }
 
 # <pre> com conteúdo de arquivo escapado e truncado. $1=arq $2=classe $3=maxlinhas
-prefile(){ local f="$1" cls="${2:-}" max="${3:-200}" n
+prefile(){ local f="$1" cls="${2:-}" max="${3:-200}" n bytes
   [[ -s "$f" ]] || return 1
-  n=$(wc -l < "$f")
-  raw "<pre class=\"$cls\">"; head -n "$max" "$f" | esc >> "$ORG"; raw "</pre>"
-  (( n > max )) && raw "<p class=\"muted\">… truncado: mostrando $max de $n linhas.</p>"
+  n=$(wc -l < "$f"); bytes=$(stat -c%s "$f" 2>/dev/null || wc -c < "$f")
+  # bytes ANTES das linhas: `head -c` corta a linha-monstro; o `head -n` segue valendo
+  raw "<pre class=\"$cls\">"; head -c "$REPORT_MAX_BYTES" "$f" | head -n "$max" | esc >> "$ORG"; raw "</pre>"
+  if (( bytes > REPORT_MAX_BYTES )); then raw "<p class=\"muted\">… truncado: mostrando $(( REPORT_MAX_BYTES / 1024 )) KB de $(( bytes / 1024 )) KB ($n linhas).</p>"
+  elif (( n > max )); then raw "<p class=\"muted\">… truncado: mostrando $max de $n linhas.</p>"; fi
   raw $'\n'; return 0; }
 
 # diff colorido (linhas </- = esperado, >/+ = obtido). $1=arq $2=maxlinhas
-difffmt(){ local f="$1" max="${2:-400}" n line c cls e
+difffmt(){ local f="$1" max="${2:-400}" n line c cls e bytes
   [[ -s "$f" ]] || return 1
-  n=$(wc -l < "$f")
+  n=$(wc -l < "$f"); bytes=$(stat -c%s "$f" 2>/dev/null || wc -c < "$f")
   raw '<pre class="diff">'
+  # bytes antes das linhas: o `while read` + escs por linha era O(n) numa linha de MB
   while IFS= read -r line; do
     c="${line:0:1}"
     case "$c" in '<'|'-') cls="d-old";; '>'|'+') cls="d-new";; *) cls="";; esac
     e="$(escs "$line")"
     if [[ -n "$cls" ]]; then o "<span class=\"$cls\">$e</span>"; else o "$e"; fi
-  done < <(head -n "$max" "$f")
+  done < <(head -c "$REPORT_MAX_BYTES" "$f" | head -n "$max")
   raw "</pre>"
-  (( n > max )) && raw "<p class=\"muted\">… diff truncado: $max de $n linhas.</p>"
+  if (( bytes > REPORT_MAX_BYTES )); then raw "<p class=\"muted\">… diff truncado: mostrando $(( REPORT_MAX_BYTES / 1024 )) KB de $(( bytes / 1024 )) KB ($n linhas).</p>"
+  elif (( n > max )); then raw "<p class=\"muted\">… diff truncado: $max de $n linhas.</p>"; fi
   raw $'\n'; return 0; }
 
 # ------------------------------------------------- lista de casos de teste ----
@@ -221,7 +242,8 @@ if (( ${#FILES[@]} > 0 )) && [[ "$REPORTMODE" != "ce" ]]; then
   total=${#FILES[@]}
   raw '<h3 style="margin:.4rem 0">Distribuição de veredictos</h3>'$'\n'
   raw '<div class="hbars">'$'\n'
-  for v in AC "AC,PE" WA TLE RE RE_NZEC TMT UE NT; do
+  # MLE entrou em 24/09/2026: faltava na lista e teste MLE sumia do gráfico (o mapa e a lista o mostravam)
+  for v in AC "AC,PE" WA TLE MLE RE RE_NZEC TMT UE NT; do
     c=${CNT[$v]:-0}; (( c == 0 )) && continue
     w=$(awk -v c="$c" -v t="$total" 'BEGIN{v=c/t*100; if(v<1.5)v=1.5; printf "%.1f", v}')
     raw "<div class=\"hbar-row\"><div class=\"hbar-label\">$(escs "$(fullname "$v")")</div>"
@@ -240,13 +262,15 @@ if (( ${#FILES[@]} > 0 )) && [[ "$REPORTMODE" != "ce" ]]; then
   done
   raw $'\n''</div>'$'\n'
   raw '<div class="legend">'
-  for v in AC WA TLE RE NT; do
+  for v in AC WA TLE MLE RE NT; do
     raw "<span><span class=\"sw\" style=\"background:$(vcolor "$v")\"></span>$(fullname "$v")</span>"
   done
   raw '</div>'$'\n'
 
   # ---- gráfico de tempo de execução (top tempos quando há muitos) ----
-  raw '<h3 style="margin:1rem 0 .2rem">Tempo de execução <span class="muted">(limite '"${TL_LANG}"'s)</span></h3>'$'\n'
+  tlhead="limite $(secs "$TL_LANG")s"
+  [[ -n "$TL_DRIFT" ]] && awk -v d="$TL_DRIFT" 'BEGIN{ exit !(d+0 > 0) }' && tlhead="$tlhead · tolerância +$(secs "$TL_DRIFT")s"
+  raw '<h3 style="margin:1rem 0 .2rem">Tempo de execução <span class="muted">('"$tlhead"')</span></h3>'$'\n'
   TIMED=(); for f in "${FILES[@]}"; do [[ -n "${T[$f]}" ]] && TIMED+=("$f"); done
   show=("${TIMED[@]}"); note=""
   if (( ${#TIMED[@]} > 50 )); then
@@ -254,14 +278,29 @@ if (( ${#FILES[@]} > 0 )) && [[ "$REPORTMODE" != "ce" ]]; then
     note="<p class=\"muted\">mostrando os 50 mais lentos de ${#TIMED[@]} testes cronometrados.</p>"
   fi
   raw '<div class="hbars timing">'$'\n'
+  declare -A TSEEN=()
   for f in "${show[@]}"; do
-    t="${T[$f]}"; v="${V[$f]}"; w="$(pct_of "$t")"
-    col=$(awk -v t="$t" -v tl="$TL_LANG" 'BEGIN{ if(tl+0<=0)tl=1; print ((t+0)>=tl)?"#be1241":"#1e57c4" }')
+    t="${T[$f]}"; v="${V[$f]}"; w="$(pct_of "$t")"; tc="$(tclass "$t" "$v")"; TSEEN[$tc]=1
+    case "$tc" in over) col="$(vcolor TLE)";; drift) col="$TCOL_DRIFT";; *) col="$TCOL_OK";; esac
+    val="${t}s"; vtitle=""
+    # curto de propósito: texto longo aqui encolhe a trilha e a barra amarela PARECE menor que as azuis
+    if [[ "$tc" == drift ]]; then
+      val="${t}s <span class=\"muted\">(+$(awk -v t="$t" -v tl="$TL_LANG" 'BEGIN{ printf "%g", t-tl }')s)</span>"
+      vtitle=" title=\"acima do limite, aceito pela tolerância${TL_DRIFT:+ de $(secs "$TL_DRIFT")s}\""
+    fi
     raw "<div class=\"hbar-row\"><div class=\"hbar-label\"><a href=\"#test-$(slugify "$f")\">$(escs "$f")</a></div>"
-    raw "<div class=\"hbar-track\"><div class=\"hbar-fill\" style=\"width:${w}%;background:${col}\"></div></div>"
-    raw "<div class=\"hbar-val\">${t}s</div></div>"$'\n'
+    raw "<div class=\"hbar-track\"${vtitle}><div class=\"hbar-fill\" style=\"width:${w}%;background:${col}\"></div></div>"
+    raw "<div class=\"hbar-val\"${vtitle}>${val}</div></div>"$'\n'
   done
   raw '</div>'$'\n'
+  # legenda PRÓPRIA do gráfico (as cores dele não são as dos veredictos do mapa): só as que aparecem
+  if [[ -n "${TSEEN[drift]:-}${TSEEN[over]:-}" ]]; then
+    raw '<div class="legend">'
+    raw "<span><span class=\"sw\" style=\"background:$TCOL_OK\"></span>dentro do limite</span>"
+    [[ -n "${TSEEN[drift]:-}" ]] && raw "<span><span class=\"sw\" style=\"background:$TCOL_DRIFT\"></span>acima do limite, aceito pela tolerância${TL_DRIFT:+ de $(secs "$TL_DRIFT")s}</span>"
+    [[ -n "${TSEEN[over]:-}" ]] && raw "<span><span class=\"sw\" style=\"background:$(vcolor TLE)\"></span>estourou o limite (Time Limit Exceeded)</span>"
+    raw '</div>'$'\n'
+  fi
   [[ -n "$note" ]] && raw "$note"$'\n'
 
   # ---- lista de casos (índice textual, colapsável) ----
@@ -316,7 +355,8 @@ if (( ${#FILES[@]} > 0 )) && [[ "$REPORTMODE" != "ce" ]]; then
     raw "<details class=\"test\"$open>"
     raw "<summary><span class=\"badge\" style=\"background:$(vcolor "$v")\">$(escs "$v")</span> "
     raw "$(escs "$f") <span class=\"tmeta\">"
-    [[ -n "$t" ]] && raw "· ${t}s / TL ${TL_LANG}s"
+    [[ -n "$t" ]] && raw "· ${t}s / TL $(secs "$TL_LANG")s"
+    [[ -n "$t" && "$(tclass "$t" "$v")" == drift ]] && raw " · acima do limite, aceito pela tolerância${TL_DRIFT:+ de $(secs "$TL_DRIFT")s}"
     [[ -n "${M[$f]}" ]] && raw " · $(mem_fmt "${M[$f]}")"
     raw "</span></summary>"$'\n'
 
@@ -372,8 +412,9 @@ raw '<table class="kv">'$'\n'
 for kv in \
   "Problema:${PROBLEM}" "Linguagem:${LANGUAGE}" "Arquivo:${SRCBASENAME}" \
   "Toolchain:${TOOLCHAIN_VER}" "Ambiente (raiz da jaula):${TOOLCHAIN_ROOT}" \
-  "Limite de tempo:${TL_LANG}s" "Veredicto final:${FINALRESP}" \
-  "Rodar tudo (RUNALL):${RUNALL}" "Paralelismo:${NPROCINFO}" \
+  "Limite de tempo:$(secs "$TL_LANG")s" "Tolerância acima do limite (drift):${TL_DRIFT:+$(secs "$TL_DRIFT")s}" \
+  "Veredicto final:${FINALRESP}" \
+  "Rodar tudo (RUNALL):${RUNALL}" "Paralelismo:${NPROCINFO:+$NPROCINFO teste(s) ao mesmo tempo}${NPROCINFO:+${CPUNEEDEDINFO:+ × $CPUNEEDEDINFO CPU(s) por teste}}${CPUGROUPSINFO:+ (CPUs: $CPUGROUPSINFO)}" \
   "Host:${HOSTBT}" "Início:${STARTDATE}" "Tempo total:${TOTALTIME}s"; do
   k="${kv%%:*}"; val="${kv#*:}"; [[ -z "$val" || "$val" == "s" ]] && continue
   raw "<tr><td class=\"k\">$(escs "$k")</td><td>$(escs "$val")</td></tr>"$'\n'

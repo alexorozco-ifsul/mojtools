@@ -28,9 +28,37 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   **`SCORE_GROUPS`** (grupos estruturados: JSON `[{"earned":N|null,"max":N},…]` na ordem do
   `tests/score`, só grupos de peso>0 — `earned`=peso (passou) | `0` (falhou) | `null` (não
   executado); vazio = sem grupos) e `CORRECT`/`TOTALTESTS`. O `FINALRESP`/contrato do stdout
-  **não muda** (compat). O banner do `report.html` mostra o **`VERDICT_CANON`** + detalhe
-  (pct de testes ou pontos/grupos).
-- `gen-report.sh` — gera o `report.html` por submissão.
+  **não muda** (compat; em problema com grupos a forma é a do `score-summary.sh`, abaixo). O banner
+  do `report.html` mostra o **`VERDICT_CANON`** + detalhe (pct de testes ou pontos/grupos).
+- **Paralelismo dos testes (24/09/2026)** no `build-and-test.sh`: cada teste roda em **k CPUs**
+  (`CPUNEEDED` do conf, 1..64, default 1) e até **P** ao mesmo tempo. O AGENTE manda pelo ambiente
+  e o ambiente VENCE conf/nproc: `MOJ_TEST_CPUS=k`, `MOJ_PARALLEL=P`, `MOJ_CPU_GROUPS="c0,c1|c2,c3|…"`
+  (P grupos; o worker g pina a jaula no grupo g via `cage-run.sh -C`), `MOJ_RELEASE_FILE` (worker
+  sem teste anota o grupo — liberação de cauda; antes do rerun serial de TLE todos os grupos ≥1 são
+  liberados e o harness se re-pina no grupo 0). Sem env: `P = min(nproc/k, MAXPARALLELTESTS)`,
+  `ALLOWPARALLELTEST=n` ⇒ 1, sem pin. **Pool**: P workers (subshells) sobre a fila de testes,
+  reivindicação por `mkdir .claim/<i>` (atômico; NUNCA FIFO com vários `read` — o bash lê pipe
+  byte a byte e as linhas se embaralham), `.stop` conferido por todo worker (STOPWHEN/RUNALL),
+  `/proc/$BAT_PID` sumiu ⇒ worker sai. O `binfile.sh` EXPORTA `MOJ_TEST_CPUS` e
+  `OMP_NUM_THREADS` (= k) p/ a jaula; o `run.sh` de MPI faz `mpirun -np "$MOJ_TEST_CPUS"`.
+  `report.env`: `NPROCINFO=P`, `CPUNEEDEDINFO=k`, `CPUGROUPSINFO`. O `calibreitor.sh` exporta
+  `MOJ_PARALLEL=1` (um teste por vez em k CPUs = a forma do julgamento; o `ALLOWPARALLELTEST=n`
+  de antes era vencido pelo conf sourced depois — bug (f)). `validate-problem.sh` reprova valor
+  inválido das 4 chaves (`conf_parallel_sane`, por grep) e avisa soft quando nenhum juiz do
+  registry tem k CPUs (num nó, com `SAMENUMA=y`). Templates `script-templates/paralelo-openmp`
+  (compile `-fopenmp`) e `paralelo-mpi` (`mpirun --bind-to none --oversubscribe -np
+  "$MOJ_TEST_CPUS"`, `set -o pipefail` — o `| grep -v UCX` legado mascarava o exit). Modo root
+  do cage-run ignora `-C` (single-slot; ver SANDBOX.md). Guia: `docs/problema-paralelo.md`.
+  Teste: `test-parallel.sh` (`make test-parallel`; cage-run FALSO + `nproc` falso). ⚠ Os
+  templates ainda não foram provados na ROOTFS (dev sem podman): passo 3 do rollout, no juiz.
+- `gen-report.sh` — gera o `report.html` por submissão. O gráfico de tempo pinta pelo VEREDICTO e pela
+  tolerância: azul (≤ TL), amarelo (acima do TL e não-TLE = passou pela tolerância, `TL_DRIFT` do
+  `report.env`), cor de TLE (estourou) — nunca o vermelho do WA (um AC na tolerância saía vermelho, relato do
+  Daniel Saad 24/09/2026). Teste: `cdmoj/server/test/smoke-report-timing.sh`.
+- **Tolerância (drift)** no `build-and-test.sh`: `TLMOD[<lang>.drift]` › `TLMOD[default.drift]` (toda
+  linguagem sem a sua — pedido do Ribas) › 0, resolvida UMA vez em `TLDRIFT` (valor não-numérico = 0) e
+  gravada de volta em `TLMOD[<lang>.drift]`; TLE só quando `tempo − TL > TLDRIFT`. O servidor espelha a regra
+  por grep no juízo das soluções (`cdmoj lib/calib-expect.sh` `calx_drift`): mexeu numa, mexa na outra.
 - `calibreitor.sh` — calibra um problema num juiz: roda as soluções, define o **TL**, grava o
   vetor ESTRUTURADO **`.calib-sols.json`** (por solução, `{file,lang,category,verdict,tests:
   [{name,code,time,tl}]}` — mesmo formato do `tests` de submissão; o agente sobe como `sols`
@@ -41,20 +69,40 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   (mktemp+mv) e `.calib-reports/` troca por rename no fim — outro slot julgando o mesmo
   problema nunca vê placeholder/tabela parcial. Nunca reintroduzir escrita direta no
   diretório compartilhado do pacote durante a calibração (raiz de veredicto errado).
-- `render-statement.sh <enunf> [fmt=md] [exemplos.html] [titulo]` — **renderizador único** do
+- `statement-langs.sh` (sourceável) — **FONTE ÚNICA dos idiomas do enunciado** (2026-09-15):
+  `stmt_langs_all` (pt en es), `stmt_file <pkg> <lang>` (PT = enunciado.{md,org,tex}; outro =
+  `docs/enunciado.<lang>.md`), `stmt_langs_of`, `stmt_note_file` (nota do idioma › PT),
+  `stmt_label` (Exemplos/Examples/Ejemplos…), `stmt_title` (titles[lang] › display_title) e
+  **`stmt_samples_html <pkg> <lang> [samples…]`** — o ÚNICO gerador do HTML dos exemplos (h3 +
+  nota por idioma), usado pelo `gen-problem-json.sh` E pelo `problems/preview.sh` do cdmoj (a cópia
+  do preview usava h4 e divergia). Quem procura arquivo de enunciado por idioma chama isto.
+  **EXEMPLO = SÓ `tests/input/sample*`** (`stmt_sample_names`, fonte única do HTML E do campo
+  `samples` do json — botão Exemplos, `/contest/samples`, `moj-comp samples`). Problema sem exemplo
+  (função, interativo, linguagem própria…) declara **`SAMPLE=no` no `conf`** (`stmt_no_samples`, lido
+  por grep — NUNCA source; aceita no|n|nao|não|false|0): nada vira exemplo, nem os `sample*` que
+  existam. **Teste oculto nunca vira exemplo** — em 2026-09-23 saíram o fallback que mostrava os 2
+  primeiros testes quando faltava `sample*` (em função, o formato interno do driver: relato do Daniel
+  Saad) e o arquivo `samples` (lista; vazio = sem exemplos). O validador exige `sample*` OU `SAMPLE=no`
+  (`examples_present`); `install-interactive.sh` grava `SAMPLE=no`. A mesma regra está no editor web
+  (`sampleOff`) e na CLI (`sample_off`) — mexeu numa, mexa nas três.
+- `render-statement.sh <enunf> [fmt=md] [exemplos.html] [titulo] [lang=pt]` — **renderizador único** do
   enunciado (pandoc standalone, `--mathml --embed-resources`). **= o "Pré-visualizar" do editor
   = o HTML servido.** Injeta `<h1 class="moj-title">` do título e remove `% Título` legado. Blocos
   ` ```{.graph} ` (fonte graphviz DOT) viram **SVG inline** via `dot` (lua-filter `graphviz.lua`;
   precisa do `graphviz` na imagem do servidor — degrada p/ código se faltar) — guia `docs/enunciado-grafos.md`.
 - `gen-problem-json.sh <pkg> [id]` — gera o índice servível do treino
   (`contests/treino/var/jsons/<id>.json`): título + autor (arquivo `author`, verbatim) + TL +
-  tags + **coleções** (`.moj-meta.json` `collections`, verbatim — um problema pode estar em várias) +
+  tags + **coleções** (`.moj-meta.json` `collections` — um problema pode estar em várias; VAZIO = a coleção homônima da org, a MESMA regra do `gen-problem-owners.sh`, desde 25/09/2026) +
   HTML (via render-statement) + exemplos (de `tests/*`, ordem `sample*`) + explicações
   (`docs/sample-notes.json`).
-  **Ignora `docs/solucao.md`** (editorial não vai ao aluno).
+  **Ignora `docs/solucao.md`** (editorial não vai ao aluno). **Um render por idioma**: PT em
+  `title`/`statement_html_b64` (compat), traduções em `statements{<lang>:{title,html_b64}}` +
+  `statement_langs`; a nota de exemplo sem tradução cai na PT.
 - `validate-problem.sh <pkg> [id]` — **portão de qualidade** (relatório em
   `run/validation/<id>.json`). `ok = (map(.ok)|all)` → todo check `add` é **HARD**. Exige
-  `## Entrada` e `## Saída`. Avisos *soft* em `render_warnings` (ex.: exemplo embutido no texto).
+  `## Entrada` e `## Saída` (aceita Input/Output e Salida); cada tradução ganha
+  `html_builds_<lang>`/`secao_*_<lang>` HARD e o aviso soft `nota-sem-traducao(<sample>,<lang>)`.
+  Avisos *soft* em `render_warnings` (ex.: exemplo embutido no texto).
   Se passar, chama `gen-problem-json.sh`.
 - **Transporte de `scripts/`**: o `moj push`/`clone` fazem round-trip COMPLETO da correção
   especial (conteúdo+`+x`+symlinks, campo `scripts_files` da API) — `moj upload <id> <dir>`
@@ -78,6 +126,16 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   py/java/rs) trazem a **SENTINELA anti-IO** (última linha de todo teste = 424242; função que
   consome a entrada ⇒ SENTINELA-VIOLADA ⇒ WA determinístico). Guia:
   `docs/submissao-de-funcao.md`; atalho da CLI: `moj fn`.
+- **Validador de ENTRADA** (`scripts/validator.cpp`, 2026-09-24): `testlib/validator-run.sh <pkg>` roda o
+  validador (testlib `registerValidation`) sobre cada `tests/input/*` e imprime UMA linha JSON
+  `category:"validator"` (`verdict` none|ok|invalid|error, `tests[{name,code:OK|INVALID|FAIL,msg}]`); a
+  calibração COMPLETA a anexa ao `.calib-sols.json` (o agente sobe o `sols` inteiro — o repo `judge` não
+  mudou) e o servidor a separa (`cdmoj lib/calib-expect.sh`). Freios: 5 s por entrada, 60 s de orçamento
+  total — validador em laço não pode comer o teto da calibração. Compila como a `checker-bridge.sh` (CÓPIA
+  de propósito: a bridge roda em ~200 pacotes e não tem teste da rota bwrap — unificar pede esse teste
+  antes; mexeu numa, confira a outra). `install-validator.sh` (= `moj validator`) roda o MESMO script na
+  máquina do autor (portável: sem flock/timeout/sha256sum no Mac). `tl-checksum.sh` deixa o
+  `scripts/validator.cpp` FORA do estreito e DENTRO do `--all-sols`. Guia: `docs/validador-testlib.md`.
 - `testlib/` — **checkers testlib normalizados**: `testlib.h` vendorada + `checker-bridge.sh`
   (compila `scripts/checker.cpp` no juiz sob demanda, cache FORA de `scripts/` p/ não poluir o
   tl-checksum) + `compare-stub.sh` + `install-checker.sh <pkg> <checker.cpp>`.
@@ -96,10 +154,16 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   compila ⇒ **UE em todo teste**) nasceu replicado em **198 pacotes** — o conserto no mojtools
   não alcançava nenhum. O `+x` dos stubs é load-bearing (o `make check` confere no índice do
   git): o handler de `script-templates` do cdmoj copia p/ o pacote o bit **do alvo** do symlink.
-- `tl-checksum.sh` — checksum do pacote p/ invalidar o TL **e o cache do juiz** quando muda: cobre
-  `conf` + `tests/{input,output,score}` + `sols/good` + `scripts` (tudo que muda TL OU veredicto —
-  `tests/score`/`output` entraram em 2026-07-19: fora do hash, um score corrigido nunca chegava ao
-  juiz; mudou a cobertura? RE-STAMPE os checksums de `run/tl/*.json` em vez de recalibrar tudo).
+- `tl-checksum.sh` — **DOIS carimbos, um programa**. Sem flag = o ESTREITO (`tl_checksum`, o que
+  invalida o TL): `conf` (menos a linha `SAMPLE`, que não muda julgamento — filtrada por `sed`, só
+  quando existe, p/ conf sem ela e sem `\n` final dar o hash de sempre) + `tests/{input,output,score}` + `sols/good` + `scripts` (tudo que muda TL
+  OU veredicto — `tests/score`/`output` entraram em 2026-07-19: fora do hash, um score corrigido
+  nunca chegava ao juiz; mudou a cobertura? RE-STAMPE os checksums de `run/tl/*.json` em vez de
+  recalibrar tudo). Com **`--all-sols`** = a VERSÃO do pacote (`pkg_version`), que soma
+  `sols/{pass,slow,wrong,upcoming}` e é a **chave do cache do juiz** (`/judge/package-meta`).
+  ⚠ Os dois papéis não cabem num carimbo só: alargar o estreito faria o TL sumir da prova a cada
+  solução salva, e mantê-lo estreito fazia o "Calibrar" rodar o `sols/` do cache velho — julgando
+  solução apagada e ignorando a nova (2026-09-20). Detalhes: `cdmoj/docs/PACOTE.md` §10.
   Também é **carimbado no
   índice de donos** por `gen-problem-owners.sh` (campo `tl_checksum`, SÓ p/ problemas já calibrados
   — têm `run/tl/<id>.json`) p/ a gestão comparar com o checksum calibrado e marcar "precisa
@@ -116,8 +180,17 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   checksum velho p/ sempre ⇒ "precisa recalibrar" fantasma no painel.
   (O antigo mirror/LFS/serviço externo foi removido no cut-over — ver `cdmoj`.)
   `score-summary.sh` — pontuação por grupos (o valor do problema é a **soma dos pesos**; pode
-  passar de 100). Além do `FINALRESP` legado (`Wrong,60p. Pontos | 30 | 0 |…`), emite o
-  **`SCORE_GROUPS`** estruturado (acima) p/ o backend servir grupos por submissão.
+  passar de 100). Os grupos decidem só a NOTA; o **veredicto é o do pior teste**, como sem grupos
+  (`VERDICTCANON[$SMALLRESP]`, do escopo do `build-and-test.sh`): `FINALRESP` =
+  `<veredicto canônico>,<n>p. Pontos | … quantitativos …` e `VERDICT_CANON` mudam JUNTOS — o que o
+  aluno vê é o PREFIXO do `FINALRESP` (o history o guarda e o `canon()` do cdmoj corta na 1ª vírgula).
+  Até 24/09/2026 era SEMPRE `Wrong,<n>p` + "Wrong Answer" (TLE/RE/MLE chegavam ao aluno como WA —
+  relato do Ribas). Regras: rótulo canônico (sem vírgula, sem dígito+`p` — o 1º `NNp` é a nota);
+  NUNCA prefixo `Accepted` com grupo falho; pacote quebrado (teste sem grupo; grupo de peso>0 sem teste
+  com tudo AC) = `Judge Error,0p. …` (e `SMALLRESP=UE`, só p/ a cor do banner); grupo de peso 0 sem
+  teste = vácuo. Emite também o **`SCORE_GROUPS`** estruturado (acima). Teste: `test-score-summary.sh`
+  (`make test-score`; cage-run FALSO: `xwa/xtle/xrte/xnz/xmle` no nome do teste). O `gen-report.sh`
+  ganhou MLE nas barras/legenda (testes MLE sumiam do gráfico).
 
 ## Regras
 
@@ -147,6 +220,15 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   `scripts/py` (sem isso a correção especial py do APC era ignorada — solução pelada ⇒ WA
   vazio), e o `build-and-test.sh` tem shim `TL[py]=TL[py3]` p/ caches `tl.<host>` calibrados
   antes da unificação.
+- **Extensão → linguagem tem FONTE ÚNICA: `lang-canon.sh`** (`lang_canon`; gêmea de
+  `cdmoj/lib/langs.sh lang_canon_ext`). C++ = `cpp|cc|cxx|c++` (+`hpp`), C = `c` (+`h`), Python =
+  `py` (+`py2|py3`). `build-and-test.sh`, `calibreitor.sh` (chave de TL E o argumento passado —
+  antes ia `${AC##*.}` cru), `validate-problem.sh` e `gen-problem-owners.sh` chamam a função; NÃO
+  reescreva o `case` inline. O `build-and-test.sh` copia a fonte p/ a jaula com a extensão
+  CANÔNICA quando a do aluno é alias (`sol.cc`/`sol.CPP` → `sol.cpp`): o `lang/cpp/compile.sh` e os
+  ~55 `scripts/cpp/compile.sh` de pacotes globam `*.cpp` — renomear a cópia faz todos funcionarem
+  sem tocar em nenhum (pedido do Ribas, 2026-09-14; antes `sol.cc` morria em "Language 'cc' not
+  availale"). Fixtures `lang-test/OlaMundo/OlaMundo.{cc,cxx,c++}` entram no `make alltests`/`hostile`.
 - **O NOME DO ARQUIVO CHEGA CRU AQUI — cite sempre.** O agente do juiz materializa a fonte com o
   nome que o aluno mandou, o `build-and-test.sh` a copia p/ dentro da jaula e o
   `lang/*/compile.sh` monta um Makefile cujo recipe o make entrega ao **`/bin/sh`**. Um
@@ -170,3 +252,16 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   aponta p/ ele, nunca se redescreve (a divergência de cópias já gerou o bug do título vazio).
   Lembre: o **título** vem do campo `display_title` (o `% Título` do enunciado é legado — o
   `render-statement.sh` o remove e injeta o `<h1>` a partir do campo).
+
+- **Exemplos como dado (2026-09-16)**: `stmt_sample_names <pkg>` é a SELEÇÃO ÚNICA dos exemplos (arquivo
+  `samples` › `tests/input/sample*` › primeiros `SAMPLE_LIMIT`); `stmt_samples_html` (HTML, agora com
+  `data-sample`/`data-kind` nos `<pre>`) e `stmt_samples_json` (`[{name,input,output}]`, campo `samples`
+  do json servível gerado pelo `gen-problem-json.sh`) usam a mesma. Por construção o dado exposto pela
+  API (`/treino/problem`, `/contest/samples`) é o que o enunciado já mostra — nunca varra `tests/input`
+  inteiro em nenhum dos dois.
+
+- **Tetos de tamanho (2026-09-16)**: `gen-report.sh` `REPORT_MAX_BYTES` (64 KB por bloco — antes o corte
+  era só por linhas e havia report de 17 MB); `statement-langs.sh` `STMT_SAMPLE_MAX_BYTES` (256 KB no HTML,
+  aviso `stmt_label truncated` DEPOIS do `</pre>` — o botão Copiar da web casa `h3+pre`) e
+  `STMT_SAMPLE_JSON_MAX_BYTES` (4 MB; acima = `too_big` sem bytes). `gen-problem-json.sh` publica por
+  HARDLINK (`ln -f`) do json privado. Teste: `cdmoj/server/test/smoke-report-caps.sh`.
