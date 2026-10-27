@@ -36,37 +36,71 @@ function sai()
       && mv -f "$t" "$PROBLEMDIR/.calib-sols.json" 2>/dev/null || rm -f "$t"
   fi
   rm $TEMP
+  rm -rf "$TEMP.claim"
   rm -f $TEMP.*
   rm -rf $TOREMOVE
 }
 
-# vetor [{name,code,time,tl}] dos testes de UM workdir do build-and-test — o MESMO formato do
-# agent_tests_json do agente do juiz (fonte: log.verdictall + <file>-log.timelog + report.env).
+# _renv <workdir> <CHAVE> — um valor do report.env do build-and-test (gravado com %q; sem source)
+_renv(){ grep -m1 "^$2=" "$1/report.env" 2>/dev/null | cut -d= -f2- | tr -d "'\""; }
+
+# vetor [{name,code,time,tl[,code_alt,tl_alt]}] dos testes de UM workdir do build-and-test — o MESMO formato do
+# agent_tests_json do agente do juiz (fonte: log.verdictall + <file>-log.timelog + report.env). UM item por
+# teste: o rerun serial de TLE acrescenta outra linha VERDICT[...] do mesmo teste, e vale a ÚLTIMA (antes saíam
+# dois itens, e o servidor contava o TLE que o rerun desfez). Na fase pass/slow/wrong, code_alt/tl_alt = o
+# veredicto e o TL do OUTRO método (log.verdictalt; TL_LANG_ALT).
 sol_tests_json(){  # $1=workdir
-  local wb="$1" tl="" line file code t
+  local wb="$1" tl="" tla="" line file t
+  local -A CODE=() ALT=(); local -a ORDER=()
   [[ -f "$wb/log.verdictall" ]] || { echo '[]'; return; }
-  tl="$(grep -m1 '^TL_LANG=' "$wb/report.env" 2>/dev/null | cut -d= -f2- | tr -d "'\"")"
-  {
+  tl="$(_renv "$wb" TL_LANG)"; tla="$(_renv "$wb" TL_LANG_ALT)"
+  while IFS= read -r line; do
+    [[ "$line" =~ ^VERDICT\[(.+)\]=(.+)$ ]] || continue
+    file="${BASH_REMATCH[1]}"; [[ -n "${CODE[$file]+x}" ]] || ORDER+=("$file")
+    CODE[$file]="${BASH_REMATCH[2]}"
+  done < "$wb/log.verdictall"
+  if [[ -f "$wb/log.verdictalt" ]]; then
     while IFS= read -r line; do
-      [[ "$line" =~ ^VERDICT\[(.+)\]=(.+)$ ]] || continue
-      file="${BASH_REMATCH[1]}"; code="${BASH_REMATCH[2]}"
+      [[ "$line" =~ ^VERDICTALT\[(.+)\]=(.+)$ ]] && ALT[${BASH_REMATCH[1]}]="${BASH_REMATCH[2]}"
+    done < "$wb/log.verdictalt"
+  fi
+  {
+    for file in "${ORDER[@]}"; do
       t=""
       [[ -s "$wb/$file-log.timelog" ]] && \
         t="$(grep -m1 '^real' "$wb/$file-log.timelog" 2>/dev/null | awk '{print $NF}')"
-      jq -cn --arg n "$file" --arg c "$code" --arg t "$t" --arg tl "$tl" \
-        '{name:$n, code:$c, time:($t|tonumber? // null), tl:($tl|tonumber? // null)}'
-    done < "$wb/log.verdictall"
+      jq -cn --arg n "$file" --arg c "${CODE[$file]}" --arg t "$t" --arg tl "$tl" --arg ca "${ALT[$file]:-}" --arg tla "$tla" \
+        '{name:$n, code:$c, time:($t|tonumber? // null), tl:($tl|tonumber? // null)}
+         + (if $ca != "" then {code_alt:$ca, tl_alt:($tla|tonumber? // null)} else {} end)'
+    done
   } | jq -s -c '.'
 }
-# acumula UMA solução no vetor (tests via --slurpfile: nunca dado por argv de jq)
+# acumula UMA solução no vetor (tests via --slurpfile: nunca dado por argv de jq). `method` = o método dos
+# `code` (TL_METHOD do report.env); `etl` = o teto de tempo de cada teste (o servidor sabe quando uma margem
+# não pôde ser medida: teste morto no teto, abaixo de b × TL).
 sols_add(){  # $1=workdir $2=file $3=lang $4=category $5=verdict
   command -v jq >/dev/null 2>&1 || return 0
   sol_tests_json "$1" > "$TEMP.tests.json"
   jq -cn --arg f "$2" --arg l "$3" --arg cat "$4" --arg v "$5" \
+     --arg m "$(_renv "$1" TL_METHOD)" --arg e "$(_renv "$1" ETL)" \
      --slurpfile tests "$TEMP.tests.json" \
-     '{file:$f, lang:$l, category:$cat, verdict:$v, tests:($tests[0] // [])}' \
+     '{file:$f, lang:$l, category:$cat, verdict:$v, tests:($tests[0] // [])}
+      + (if $m != "" then {method:$m} else {} end)
+      + (($e|tonumber? // null) as $x | if $x != null then {etl:$x} else {} end)' \
      >> "$TEMP.sols.jsonl" 2>/dev/null
   rm -f "$TEMP.tests.json"
+}
+# alt_line <workdir> — o resumo da solução pelo OUTRO método (log.verdictalt; vale a última linha de cada teste)
+alt_line(){
+  local wb="$1" line f v out="" k
+  local -A A=() N=()
+  [[ -f "$wb/log.verdictalt" ]] || return 0
+  while IFS= read -r line; do
+    [[ "$line" =~ ^VERDICTALT\[(.+)\]=(.+)$ ]] && A[${BASH_REMATCH[1]}]="${BASH_REMATCH[2]}"
+  done < "$wb/log.verdictalt"
+  for f in "${!A[@]}"; do v="${A[$f]}"; N[$v]=$(( ${N[$v]:-0} + 1 )); done
+  for k in AC AC,PE WA TLE MLE RE RE_NZEC TMT UE; do [[ -n "${N[$k]:-}" ]] && out+="${out:+ · }$k ${N[$k]}"; done
+  echo "Pelo método $(_renv "$wb" TL_METHOD_ALT) (TL $(_renv "$wb" TL_LANG_ALT)s): $out"
 }
 
 trap sai EXIT
@@ -76,6 +110,7 @@ PROBLEMDIR=$(realpath $1)
 
 cd $(dirname $0)
 source ./lang-canon.sh   # extensão -> linguagem canônica (cc/cxx/c++ = cpp, py2/py3 = py)
+source ./tl-methods.sh   # os métodos de TL: kattis_params, tl_kattis (o MOJ fica aqui embaixo, intocado)
 
 if [[ ! -e build-and-test.sh ]]; then
   stat build-and-test.sh
@@ -93,7 +128,9 @@ HOSTNAME="${HOSTNAME:-$(hostname)}"
 TLHOST="$PROBLEMDIR/tl.$HOSTNAME"
 [[ -z "$CALIBRATIONTL" ]] && CALIBRATIONTL=5
 CALTL="$TEMP.tl"
-echo "TL[default]=$CALIBRATIONTL" > "$CALTL"
+# a metade Kattis do fictício (mesmo TL): problema com TLMETHOD=kattis roda as good sem o aviso de tabela sem
+# TLKATTIS do build-and-test
+printf 'TL[default]=%s\ndeclare -A TLKATTIS\nTLKATTIS[default]=%s\n' "$CALIBRATIONTL" "$CALIBRATIONTL" > "$CALTL"
 export MOJ_TLFILE="$CALTL"       # build-and-test filhos leem daqui (vence tl.<host>/tl)
 export MOJ_CALIBRATING=1         # a CALIBRAÇÃO mede de verdade: TLOVERRIDE não se aplica aqui
 # UM teste por vez, em k CPUs (CPUNEEDED): o TL é medido na MESMA forma em que o julgamento roda
@@ -101,6 +138,10 @@ export MOJ_CALIBRATING=1         # a CALIBRAÇÃO mede de verdade: TLOVERRIDE n�
 # depois) — a calibração rodava testes em paralelo sem querer (bug (f), 24/09/2026). A env do
 # agente (MOJ_TEST_CPUS/MOJ_CPU_GROUPS, largura k) atravessa; MOJ_PARALLEL é sempre 1 aqui.
 export MOJ_PARALLEL=1
+# A calibração NUNCA libera grupo de CPU ao agente (26/10/2026). A calibração disparada por um JOB herdava o
+# MOJ_RELEASE_FILE dele, e cada build-and-test filho anotava os grupos ≥ 1 como livres ao fim do seu pool
+# (_release_group): o agente devolvia ao escalonador os slots que o job ainda ia usar para julgar.
+unset MOJ_RELEASE_FILE
 # temps de um run morto (kill -9) + o vetor estruturado ANTERIOR: sols é sempre da calibração
 # corrente — run abortado deixa sols AUSENTE (o agente não o manda e o servidor preserva/zera
 # pelo checksum), nunca dado velho com cara de novo
@@ -133,32 +174,102 @@ if [[ -z "$CALIBRATE_ONLY_GOOD" ]]; then
   fi
 fi
 
+# ===== RAIAS (26/10/2026; pedido do Ribas: a calibração roda as soluções do mesmo tipo em paralelo) ============
+# MOJ_CALIB_LANES — o agente procura este nome aqui p/ saber que o calibreitor tem raias; MOJ_CALIB_LANES=0 no
+# ambiente desliga (uma raia só, qualquer que seja o nº de grupos).
+# As raias são os grupos de CPU do agente (MOJ_CPU_GROUPS="g0|g1|…"; vazio/ausente = 1 raia, o caminho de sempre).
+# Cada raia é uma subshell pinada no seu grupo que reivindica soluções por `mkdir $TEMP.claim/<i>` (o padrão do
+# pool do build-and-test) e roda um build-and-test com MOJ_CPU_GROUPS=<o grupo> e MOJ_PARALLEL=1: cada SOLUÇÃO
+# segue rodando um teste por vez em k CPUs, a forma do julgamento. Duas fases com barreira: as good (a tabela de TL
+# sai delas) e depois pass+slow+wrong (julgadas pela tabela nova). Só o PAI, em ordem, lê os resultados, calcula W e
+# LANGOK e grava os arquivos comuns (report, vetor `sols`): o log sai igual ao serial, só que no fim da fase.
+CALIB_GROUPS=()
+if [[ -n "${MOJ_CPU_GROUPS+x}" ]]; then
+  _cg="${MOJ_CPU_GROUPS}"
+  while :; do CALIB_GROUPS+=("${_cg%%|*}"); [[ "$_cg" == *"|"* ]] || break; _cg="${_cg#*|}"; done
+else
+  CALIB_GROUPS=("")
+fi
+[[ "${MOJ_CALIB_LANES:-1}" == 0 ]] && CALIB_GROUPS=("${CALIB_GROUPS[0]}")
+
+# _run_phase <runall> <solução…> : roda as soluções em L = min(grupos, soluções) raias e espera todas (barreira).
+# Deixa $TEMP.item.<i>.out (o stdout do build-and-test: 1ª linha = workdir, última = veredicto) p/ o pai.
+_run_phase(){
+  local runall="$1"; shift
+  local -a items=("$@"); local n=${#items[@]} L=${#CALIB_GROUPS[@]} li
+  local -a pids=()
+  (( n == 0 )) && return 0
+  (( L > n )) && L=$n
+  rm -rf "$TEMP.claim"; mkdir -p "$TEMP.claim"
+  for (( li=0; li<L; li++ )); do
+    ( trap - EXIT          # a raia nunca publica nem apaga nada (o sai() é do pai)
+      g="${CALIB_GROUPS[li]}"
+      (( L > 1 )) && [[ -n "$g" ]] && taskset -pc "$g" $BASHPID >/dev/null 2>&1
+      for (( i=0; i<n; i++ )); do
+        mkdir "$TEMP.claim/$i" 2>/dev/null || continue
+        f="${items[i]}"; lg="$(lang_canon "${f##*.}")"
+        # a solução COMEÇOU: o resultado de cada uma só sai no fim da fase, e uma calibração morta no teto de
+        # wall-clock (o agente mata a árvore) deixaria o log sem dizer qual solução estava rodando
+        echo "  [raia $li] ${f##*/}"
+        if (( L > 1 )); then
+          MOJ_CPU_GROUPS="$g" MOJ_PARALLEL=1 bash build-and-test.sh "$lg" "$f" "$PROBLEMDIR" "$runall" \
+            > "$TEMP.item.$i.out" 2> "$TEMP.item.$i.err"
+        else
+          bash build-and-test.sh "$lg" "$f" "$PROBLEMDIR" "$runall" > "$TEMP.item.$i.out" 2> "$TEMP.item.$i.err"
+        fi
+      done ) &
+    pids+=($!)
+  done
+  wait "${pids[@]}" 2>/dev/null
+  return 0
+}
+# _item_tv <i> : T (o workdir) e A (o veredicto) da solução i, como o agente lê o build-and-test (1ª e última
+# linha). Build-and-test morto antes do veredicto (a última linha é o próprio workdir) = A vazio.
+_item_tv(){
+  T="$(head -n1 "$TEMP.item.$1.out" 2>/dev/null)"; A="$(tail -n1 "$TEMP.item.$1.out" 2>/dev/null)"
+  [[ "$A" == "$T" || -d "$A" ]] && A=""
+  return 0
+}
+# _item_err <i> : build-and-test sem veredicto — o fim do stderr dele vai ao log (o agente sobe o log; sem isto a
+# falha virava só "<sem veredito>")
+_item_err(){
+  [[ -z "$A" && -s "$TEMP.item.$1.err" ]] || return 0
+  echo "  stderr do build-and-test:"; tail -c 600 "$TEMP.item.$1.err" | sed 's/^/    /'
+}
+# _exectimes <workdir> : as linhas EXECTIME do trace (ancorado: o trace copia o stderr da solução, e uma linha
+# "… EXECTIME x 0.01 AC" no meio dela não é tempo), "<tempo> <código>" por linha
+_exectimes(){
+  local _ln _a _b et sr
+  [[ -n "$1" && -f "$1/run-trace.log" ]] || return 0
+  while IFS= read -r _ln; do
+    [[ "$_ln" =~ ^EXECTIME[[:space:]] ]] || continue
+    read -r _a _b et sr <<< "$_ln"
+    printf '%s %s\n' "$et" "$sr"
+  done < "$1/run-trace.log"
+}
+
 echo "AC solutions:"
-for AC in $PROBLEMDIR/sols/good/*; do
+export ALLOWPARALLELTEST=n
+GOODS=()
+for AC in $PROBLEMDIR/sols/good/*; do [[ -e "$AC" ]] && GOODS+=("$AC"); done
+_run_phase "$ALLOWTLEDURINGCALIBRATION" "${GOODS[@]}"
+for i in "${!GOODS[@]}"; do
+  AC="${GOODS[i]}"
   echo "${AC##*/}:"
   # extensão -> linguagem canônica (lang-canon.sh): py2/py3 legadas = py; cc/cxx/c++ = cpp.
   # Chave ÚNICA na tabela de TL — e é o canônico que vai ao build-and-test (era a extensão crua).
   LANG="$(lang_canon "${AC##*.}")"
   [[ ! -n "${WORSTTIMEPERLANG[$LANG]}" ]] && WORSTTIMEPERLANG[$LANG]=0.01
-
-  mkfifo $TEMP.coprocout
-  export ALLOWPARALLELTEST=n
-  coproc bash build-and-test.sh "$LANG" $AC $PROBLEMDIR $ALLOWTLEDURINGCALIBRATION &>$TEMP.coprocout
-  #read -u ${COPROC[0]} T
-  exec 7<$TEMP.coprocout
-  read -u 7 T
-  while read L; do
-    [[ "$L" =~ "EXECTIME" ]] || continue;
-    read l l ET SMALLRESP <<< "$L"
-    printf " $ET"
-    [[ "$SMALLRESP" != "AC" ]] && printf "($SMALLRESP)"
+  _item_tv "$i"
+  while read -r ET SMALLRESP; do
+    printf ' %s' "$ET"
+    [[ "$SMALLRESP" != "AC" ]] && printf '(%s)' "$SMALLRESP"
     if [[ "$SMALLRESP" =~ "AC" ]] && echo "$ET > ${WORSTTIMEPERLANG[$LANG]}"|bc |grep -q 1; then
       WORSTTIMEPERLANG[$LANG]=$ET
     fi
-  done <<< $(tail -f --pid=$COPROC_PID $T/run-trace.log)
+  done < <(_exectimes "$T")
   echo
 
-  read -u 7 A
   if [[ "${A}" =~ "Accepted" ]]; then
     LANGOK[$LANG]=1
   elif [[ "${A}" =~ "Time Limit Exceeded" && "$ALLOWTLEDURINGCALIBRATION" == "y" ]]; then
@@ -171,14 +282,13 @@ for AC in $PROBLEMDIR/sols/good/*; do
     # calibrada" mesmo assim). Quem diz quais linguagens ficaram sem TL é o resumo no fim.
     # ⚠ "was waiting Accepted" é contrato: o agente do juiz conta as falhas por essa frase.
     echo "$AC got '${A:-<sem veredito>}', was waiting Accepted. Check ${T}"
+    _item_err "$i"
   fi
   echo "Verdict: $A"
   echo
   save_report "$T" "good-${AC##*/}"
   sols_add "$T" "${AC##*/}" "$LANG" good "$A"
   TOREMOVE+=" ${T}"
-  exec 7<&-
-  rm -f $TEMP.coprocout
 done
 
 TLMULT=1.35
@@ -186,6 +296,9 @@ TLMULT=1.35
 [[ -n "${TLMOD[calibrafactor]}" ]] && TLMULT=${TLMOD[calibrafactor]}
 
 BESTTIME=10000
+# W[lang] CRU (o pior tempo de teste AC das good) — o laço do MOJ abaixo troca o valor pelo TL; o Kattis usa este
+declare -A WRAW
+for t in ${!WORSTTIMEPERLANG[@]}; do WRAW[$t]="${WORSTTIMEPERLANG[$t]}"; done
 
 # monta a tabela FINAL na cópia privada; o dir compartilhado só vê o resultado completo
 echo "#Generated by calibreitor on $HOSTNAME ($(date -R))" > "$CALTL"
@@ -203,6 +316,25 @@ done
 [[ "$BESTTIME" == 10000 ]] && BESTTIME="$CALIBRATIONTL"
 echo "TL[default]=$BESTTIME" >> "$CALTL"
 
+# MÉTODO KATTIS (spec 2025-09, por linguagem — decisão do Ribas, 26/10/2026; tl-methods.sh): o menor múltiplo de
+# r que é ≥ a × W[lang], com o MESMO W[lang] do MOJ; default = o menor, como no MOJ. A tabela leva as DUAS
+# metades sempre; quem escolhe é o TLMETHOD do conf, no julgamento. O `declare -A` vai DENTRO do arquivo: o
+# agente do juiz faz `source` dele sob `set -u` declarando só TL/TLMOD, e sem isto a reportagem morreria.
+read -r KATTIS_A KATTIS_B KATTIS_R < <(kattis_params)
+declare -A TLK
+KBEST=""
+for t in ${!WRAW[@]}; do
+  [[ -n "${LANGOK[$t]}" ]] || continue
+  TLK[$t]="$(tl_kattis "${WRAW[$t]}" "$KATTIS_A" "$KATTIS_R")"
+  if [[ -z "$KBEST" ]] || echo "${TLK[$t]} < $KBEST" | bc | grep -q 1; then KBEST="${TLK[$t]}"; fi
+done
+{
+  echo "# Kattis 2025-09: o menor múltiplo de r >= a x pior AC, por linguagem (a=$KATTIS_A r=$KATTIS_R); default = o menor"
+  echo "declare -A TLKATTIS"
+  for t in ${!TLK[@]}; do echo "TLKATTIS[$t]=${TLK[$t]}"; done
+  echo "TLKATTIS[default]=${KBEST:-$CALIBRATIONTL}"
+} >> "$CALTL"
+
 # PUBLICAÇÃO ATÔMICA (mktemp no MESMO fs + mv): leitor concorrente (submissão noutro slot
 # fazendo `source tl.<host>`) vê SEMPRE uma tabela completa — a anterior ou esta, nunca
 # um arquivo pela metade nem o dummy TL[default] do início da calibração.
@@ -216,6 +348,9 @@ publish_tl "$PROBLEMDIR/tl"
 
 echo "Calibrated TL ($HOSTNAME):"
 tail -n+1 "$TLHOST"
+for t in ${!TLK[@]}; do
+  echo "Kattis: $t $KATTIS_A × ${WRAW[$t]} = $(echo "$KATTIS_A * ${WRAW[$t]}" | LC_ALL=C bc -l | _tlm_clean) → ${TLK[$t]} s (resolução $KATTIS_R s)"
+done
 for t in ${!WORSTTIMEPERLANG[@]}; do
   [[ -n "${LANGOK[$t]}" ]] || echo "linguagem $t NÃO calibrada neste host (nenhuma solução good $t foi aceita)"
 done
@@ -227,31 +362,38 @@ if [[ -n "$CALIBRATE_ONLY_GOOD" ]]; then
   exit 0
 fi
 
+# pass/slow/wrong: o build-and-test julga pelo método do conf E TAMBÉM pelo outro (MOJ_CALIB_ALT): o veredicto
+# alternativo de cada teste vai p/ o log.verdictalt e o vetor estruturado (code_alt/tl_alt); trocar o método no
+# conf não perde o juízo das soluções.
+export MOJ_CALIB_ALT=1
+OTHERS=(); OCATS=()
+for OTHERSOL in pass slow wrong; do
+  [[ -d "$PROBLEMDIR/sols/$OTHERSOL" ]] || continue
+  for TLs in $PROBLEMDIR/sols/$OTHERSOL/*; do [[ -e "$TLs" ]] && { OTHERS+=("$TLs"); OCATS+=("$OTHERSOL"); }; done
+done
+_run_phase y "${OTHERS[@]}"
+i=0
 for OTHERSOL in pass slow wrong; do
   [[ ! -d "$PROBLEMDIR/sols/$OTHERSOL" ]] && continue
   echo
   echo "${OTHERSOL^^} solutions:"
-  for TLs in $PROBLEMDIR/sols/$OTHERSOL/*; do
-    if [[ ! -e $TLs ]]; then echo none; continue;fi
+  nsol=0
+  while (( i < ${#OTHERS[@]} )) && [[ "${OCATS[i]}" == "$OTHERSOL" ]]; do
+    TLs="${OTHERS[i]}"
     echo "${TLs##*/}:"
     LANG="$(lang_canon "${TLs##*.}")"
-    mkfifo $TEMP.coproc
-    coproc bash build-and-test.sh "$LANG" $TLs $PROBLEMDIR y >$TEMP.coproc
-    exec 7<$TEMP.coproc
-    read -u 7 T
-    tail -f --pid=$COPROC_PID $T/run-trace.log|
-      while read L; do
-        [[ "$L" =~ "EXECTIME" ]] || continue;
-        read l l ET SMALLRESP <<< "$L"
-        printf "$ET($SMALLRESP) "
-      done
+    _item_tv "$i"
+    while read -r ET SMALLRESP; do printf '%s(%s) ' "$ET" "$SMALLRESP"; done < <(_exectimes "$T")
     echo
-    read -u 7 BIGRESP
+    BIGRESP="$A"
     echo "Verdict: $BIGRESP"
+    _item_err "$i"
+    alt_line "$T"
     save_report "$T" "$OTHERSOL-${TLs##*/}"
     sols_add "$T" "${TLs##*/}" "$LANG" "$OTHERSOL" "$BIGRESP"
-    exec 7<&-
-    rm -f $TEMP.coproc
     TOREMOVE+=" ${T}"
+    i=$((i+1)); nsol=$((nsol+1))
   done
+  if (( nsol == 0 )); then echo none; fi   # `if`, não `&&`: como última linha do script, o `&&` falso virava rc 1
 done
+exit 0

@@ -93,14 +93,20 @@ author=""
 # servível = MÁX entre hosts p/ o checksum ATUAL do pacote. Se o pacote mudou e ninguém
 # recalibrou ainda, fica {} (o tl antigo é descartado). Fallback legado: tl.<host>/tl no
 # pacote (fallback p/ pacotes antigos sem o campo).
+# MÉTODO do TL (26/10/2026, tl-methods.sh): TLMETHOD=kattis no conf serve a metade Kattis (`hosts[].tl_kattis` do
+# store; `TLKATTIS[...]` no fallback) — sem ela, {} (TL ainda não calibrado por esse método), nunca o MOJ no
+# lugar: o juiz julga pelo método do conf. Lido por sed (o conf é texto do autor; isto roda no servidor).
+tl_method="$(sed -nE 's/^[[:space:]]*TLMETHOD=["'"'"']?([a-z]*).*/\1/p' "$PKG/conf" 2>/dev/null | tail -1)"
+[[ "$tl_method" == kattis ]] || tl_method=moj
+tl_field=tl; tl_arr=TL; [[ "$tl_method" == kattis ]] && { tl_field=tl_kattis; tl_arr=TLKATTIS; }
 tl_json='{}'
 storef="$MOJ_TL_STORE/$ID.json"
 cur_cks="$(bash "$MOJTOOLS_DIR/tl-checksum.sh" "$PKG" 2>/dev/null)"
 # chaves py3/py2 são LEGADAS (calibração pré-unificação do python): fundem em 'py' por MAX.
 if [[ -f "$storef" && -n "$cur_cks" ]]; then
-  tl_json="$(jq -c --arg cks "$cur_cks" '
+  tl_json="$(jq -c --arg cks "$cur_cks" --arg f "$tl_field" '
     if (.checksum // "")!=$cks or ((.hosts // {})|length)==0 then {}
-    else [ .hosts[].tl // {} ]
+    else [ .hosts[][$f] // {} ]
          | reduce (.[]|to_entries[]) as $e ({};
              ($e.key | if .=="py3" or .=="py2" then "py" else . end) as $k
              | .[$k]=([(.[$k]//0),($e.value|tonumber? // 0)]|max))
@@ -110,13 +116,14 @@ fi
 if [[ "$tl_json" == '{}' ]]; then
   TLFILE="$PKG/tl"; [[ -f "$PKG/tl.$HOSTNAME" ]] && TLFILE="$PKG/tl.$HOSTNAME"
   if [[ -f "$TLFILE" ]]; then
-    declare -A TL; declare -A TLMOD
-    source "$TLFILE" 2>/dev/null
-    { for k in "${!TL[@]}"; do printf '%s\t%s\n' "$k" "${TL[$k]}"; done; } \
-      | jq -R -s -c 'split("\n")|map(select(length>0)|split("\t")
-          |{((.[0]) | if .=="py3" or .=="py2" then "py" else . end):.[1]})|add // {}' \
-      > /tmp/.tljson.$$ 2>/dev/null && tl_json="$(cat /tmp/.tljson.$$)"; rm -f /tmp/.tljson.$$
-    unset TL TLMOD
+    # lido por REGEX, NUNCA `source`: este script roda NA API e o `tl` do pacote pode chegar no tar do autor
+    # (upload) — até 26/10/2026 um `TL[c]=$(…)` aqui executava código no servidor. Vale a ÚLTIMA linha de
+    # cada linguagem, como no bash; o que não é número não é TL.
+    tl_json="$(sed -nE 's/^[[:space:]]*'"$tl_arr"'\[([A-Za-z0-9+]{1,16})\]=["'"'"']?([0-9]+\.?[0-9]*|\.[0-9]+)["'"'"']?[[:space:]]*(#.*)?$/\1\t\2/p' \
+        "$TLFILE" 2>/dev/null \
+      | jq -Rnc '[inputs | split("\t") | select(length==2)
+                  | {((.[0]) | if .=="py3" or .=="py2" then "py" else . end): .[1]}] | add // {}' 2>/dev/null)"
+    [[ -n "$tl_json" ]] || tl_json='{}'
   fi
 fi
 # CPUNEEDED/SAMENUMA (problema paralelo): vão ao json servível p/ quem NÃO abre pacote (o preflight
@@ -141,19 +148,38 @@ IFS=', ' read -ra _fnl <<<"$fnl_raw"
 fnl_json="$(for l in "${_fnl[@]}"; do l="$(lang_canon "$l")"; [[ "$l" =~ ^[a-z0-9]{1,16}$ ]] && printf '%s\n' "$l"; done \
   | jq -Rsc 'split("\n") | map(select(length > 0)) | unique' 2>/dev/null)"
 [[ -n "$fnl_json" ]] || fnl_json='[]'
-# TLOVERRIDE do conf do PACOTE: o autor decide o TL na marra e o treino exibe o EFETIVO
-# (override[lang] // override[default] // calibrado[lang]). O conf é CÓDIGO do autor e este
-# script roda no SERVIDOR: parse por sed, NUNCA source. Espelho de tl_conf_overrides/
-# tl_override_apply (cdmoj lib/tl-store.sh) — duplicação pequena e consciente: repos independentes.
+# TLOVERRIDE e TLMOD[<lang>.sum|.mult] do conf do PACOTE: o treino exibe o TL EFETIVO, a conta do juiz —
+# (calibrado[lang] // calibrado[default]) + sum, × mult, e o override (final) por cima. O conf é CÓDIGO do autor e
+# este script roda no SERVIDOR: parse por sed, NUNCA source. Espelho de tl_conf_overrides/tl_conf_mods/
+# tl_override_apply (cdmoj lib/tl-store.sh) — duplicação pequena e consciente: repos independentes; o
+# _TL_EFF_DEF abaixo é cópia LITERAL da de lá (o smoke-tl-mods.sh do cdmoj confere).
 ov_json="$(sed -nE 's/^[[:space:]]*TLOVERRIDE\[([A-Za-z0-9]{1,16})\]=([0-9]+\.?[0-9]*|\.[0-9]+)[[:space:]]*(#.*)?$/\1\t\2/p' \
     "$PKG/conf" 2>/dev/null \
   | jq -Rnc '[inputs | split("\t") | select(length==2)
               | {((.[0] | if .=="py3" or .=="py2" then "py" else . end)): .[1]}] | add // {}')"
-if [[ -n "$ov_json" && "$ov_json" != '{}' ]]; then
-  tl_json="$(jq -cn --argjson tl "$tl_json" --argjson ov "$ov_json" '
-    (($tl|keys) + ($ov|keys) | unique) as $ks
-    | reduce $ks[] as $k ({}; .[$k] = ($ov[$k] // $ov["default"] // $tl[$k]))
-    | with_entries(select(.value != null) | .value |= tostring)')"
+mods_json="$(sed -nE 's/^[[:space:]]*TLMOD\[([A-Za-z0-9]{1,16})\.(sum|mult)\]=(-?([0-9]+\.?[0-9]*|\.[0-9]+))[[:space:]]*(#.*)?$/\1\t\2\t\3/p' \
+    "$PKG/conf" 2>/dev/null \
+  | jq -Rnc '[inputs | split("\t") | select(length == 3 and ((.[2] | tonumber?) != null))
+              | select(.[0] as $l | ["default", "py2", "py3", "cc", "cxx", "hpp", "h"] | index($l) | not)]
+             | if length == 0 then {}
+               else reduce .[] as $e ({sum: {}, mult: {}}; .[$e[1]][$e[0]] = ($e[2] | tonumber)) end')"
+_TL_EFF_DEF='
+def tl_eff($cal; $ov; $m):
+  ($m.sum // {}) as $s | ($m.mult // {}) as $x
+  | ((($cal | keys) + ($ov | keys) + ($s | keys) + ($x | keys)) | unique) as $ks
+  | reduce $ks[] as $k ({};
+      .[$k] = (if $k == "default" then ($ov["default"] // $cal["default"])
+               else ($ov[$k] // $ov["default"]
+                     // (($cal[$k] // $cal["default"]) as $b
+                         | if $b == null or ((($s | has($k)) or ($x | has($k))) | not) then $b
+                           else (((((($b | tonumber) + ($s[$k] // 0)) * ($x[$k] // 1)) * 1000000) | round) / 1000000)
+                           end))
+               end))
+  | with_entries(select(.value != null) | .value |= tostring);
+'
+if [[ ( -n "$ov_json" && "$ov_json" != '{}' ) || ( -n "$mods_json" && "$mods_json" != '{}' ) ]]; then
+  tl_json="$(jq -cn --argjson tl "$tl_json" --argjson ov "${ov_json:-{\}}" --argjson m "${mods_json:-{\}}" \
+    "$_TL_EFF_DEF"'tl_eff($tl; $ov; $m)')"
   [[ -n "$tl_json" ]] || tl_json='{}'
 fi
 
@@ -220,7 +246,8 @@ out_json="$(jq -cn --arg id "$ID" --arg title "$title" --arg author "$author" --
   --argjson pub "$public" --argjson slangs "$langs_json" --slurpfile stmts "$stmts_f" --slurpfile smp "$samples_f" \
   --argjson cpun "$cpun" --argjson snuma "$snuma" --argjson fnl "$fnl_json" \
   --argjson swwa "$sw_wa" --argjson swtle "$sw_tle" --argjson swre "$sw_re" --argjson ntests "$ntests" \
-  '{id:$id, title:$title, author:$author, time_limits:$tl, tags:$tags, collections:$colls, languages:$langs, public:$pub,
+  --arg tlm "$tl_method" \
+  '{id:$id, title:$title, author:$author, time_limits:$tl, tl_method:$tlm, tags:$tags, collections:$colls, languages:$langs, public:$pub,
     statement_langs:$slangs, statement_html_b64:$html, samples:($smp[0] // []), cpu_needed:$cpun, same_numa:$snuma,
     function_langs:$fnl, stop_when:{wa:$swwa, tle:$swtle, re:$swre}, tests:$ntests}
    + (if ($stmts[0]|length) > 0 then {statements:$stmts[0]} else {} end)')"
