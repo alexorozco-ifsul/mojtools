@@ -17,7 +17,7 @@ TARFILE    ?= moj-sysroot-$(TAG).tar.zst
 # .deb proprietário do Dyalog APL (opcional): make sysroot-image APL=/caminho/dyalog.deb
 APL        ?=
 
-.PHONY: help check test-validator test-parallel test-score test-fn deps sysroot sysroot-image sysroot-tar sysroot-push
+.PHONY: help check test-validator test-parallel test-score test-final-loop test-fn test-no-source test-calib test-calib-lanes test-tl-methods test-kattis deps sysroot sysroot-image sysroot-tar sysroot-push
 
 help:
 	@sed -n '1,12p' Makefile
@@ -63,10 +63,42 @@ test-parallel:
 test-score:
 	@bash test-score-summary.sh
 
+## test-final-loop — o laço final depois do pool (26/10/2026): parada espúria (TLE que passa no rerun) roda a
+##                   cauda em série; parada confirmada não roda; grupo com teste que não rodou não pontua;
+##                   sem linha EXECTIME vazia (build-and-test real, cage-run FALSO)
+test-final-loop:
+	@bash test-final-loop.sh
+
 ## test-fn — FUNCTION_LANGS (submissão de função): tl-checksum a ignora, gen-problem-json a serve,
 ##           validate-problem a confere, install-fn a grava, driver-langs.sh (a heurística)
 test-fn:
 	@bash fn/test-function-langs.sh
+
+## test-no-source — o conf e o tl do PACOTE nunca são `source`ados no servidor (kattis/sidecar.sh, export.sh,
+##                  gen-problem-json.sh): conf/tl envenenados não executam nada e os valores certos saem
+test-no-source:
+	@bash test-no-source.sh
+
+## test-calib — os DOIS métodos de TL (tl-methods.sh): a tabela com as metades MOJ e Kattis, pass/slow/wrong
+##              julgadas pelos dois (code_alt), o piso de tempo da calibração, o método do job, o tl-checksum
+##              e o validate (calibreitor + build-and-test reais, cage-run FALSO)
+test-calib:
+	@bash test-calib-methods.sh
+
+## test-calib-lanes — a calibração em RAIAS (as soluções do mesmo tipo em paralelo, uma por grupo de CPU): o mesmo
+##                    resultado e o mesmo log do serial, o pin por raia, a sobreposição no tempo e as bordas
+test-calib-lanes:
+	@bash test-calib-lanes.sh
+
+## test-tl-methods — a faixa dos parâmetros do Kattis (_tlm_in) SEM bc: a conferência do pacote roda no
+##                   servidor, cuja imagem não tem bc; e a mesma resposta do _num_in da CLI
+test-tl-methods:
+	@bash test-tl-methods.sh
+
+## test-kattis — o tempo na ida e volta MOJ ⇄ Kattis (kattis/import.sh, export.sh): método, multiplicadores,
+##               time_limit = TLOVERRIDE[default], pass/brute_force (precisa de python3+pyyaml)
+test-kattis:
+	@bash kattis/test-kattis.sh
 
 ## deps — doctor de dependências (host e, com --rootfs, dentro da jaula)
 deps:

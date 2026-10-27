@@ -41,9 +41,18 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   byte a byte e as linhas se embaralham), `.stop` conferido por todo worker (STOPWHEN/RUNALL),
   `/proc/$BAT_PID` sumiu ⇒ worker sai. O `binfile.sh` EXPORTA `MOJ_TEST_CPUS` e
   `OMP_NUM_THREADS` (= k) p/ a jaula; o `run.sh` de MPI faz `mpirun -np "$MOJ_TEST_CPUS"`.
-  `report.env`: `NPROCINFO=P`, `CPUNEEDEDINFO=k`, `CPUGROUPSINFO`. O `calibreitor.sh` exporta
+  `report.env`: `NPROCINFO=P`, `CPUNEEDEDINFO=k`, `CPUGROUPSINFO`. **Laço final (26/10/2026)**: a
+  regra de parada é UMA função (`_stops <rc>`, com `_verdict_rc`), usada pelo pool e reaplicada EM ORDEM
+  no laço final sobre os veredictos finais (depois do rerun de TLE): parada espúria (o TLE que a disparou
+  passa no rerun) ⇒ os testes que o pool não rodou rodam ali, em série no grupo 0, sem rerun; com falha
+  confirmada eles não rodam (e o `score-summary.sh` conta `SOMA[g,NT]`: grupo com teste que não rodou
+  NÃO pontua). Antes: "Unknown ERROR" e, com grupos, "Accepted" FALSO; e o `((RESPERRO++)) && continue`
+  não pulava com RESPERRO 0 (linha EXECTIME vazia). ⚠ o `score-summary.sh` roda sob `set -f`: glob só
+  com `set +f` local. Teste: `test-final-loop.sh`. O `calibreitor.sh` exporta
   `MOJ_PARALLEL=1` (um teste por vez em k CPUs = a forma do julgamento; o `ALLOWPARALLELTEST=n`
-  de antes era vencido pelo conf sourced depois — bug (f)). `validate-problem.sh` reprova valor
+  de antes era vencido pelo conf sourced depois — bug (f)) e tira o `MOJ_RELEASE_FILE` (a calibração
+  nunca libera grupo: a disparada por um job de P grupos devolvia os slots dele no meio do julgamento,
+  26/10/2026; teste em `test-calib-methods.sh`). `validate-problem.sh` reprova valor
   inválido das 4 chaves (`conf_parallel_sane`, por grep) e avisa soft quando nenhum juiz do
   registry tem k CPUs (num nó, com `SAMENUMA=y`). Templates `script-templates/paralelo-openmp`
   (compile `-fopenmp`) e `paralelo-mpi` (`mpirun --bind-to none --oversubscribe -np
@@ -59,10 +68,21 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   linguagem sem a sua — pedido do Ribas) › 0, resolvida UMA vez em `TLDRIFT` (valor não-numérico = 0) e
   gravada de volta em `TLMOD[<lang>.drift]`; TLE só quando `tempo − TL > TLDRIFT`. O servidor espelha a regra
   por grep no juízo das soluções (`cdmoj lib/calib-expect.sh` `calx_drift`): mexeu numa, mexa na outra.
-- `calibreitor.sh` — calibra um problema num juiz: roda as soluções, define o **TL**, grava o
-  vetor ESTRUTURADO **`.calib-sols.json`** (por solução, `{file,lang,category,verdict,tests:
-  [{name,code,time,tl}]}` — mesmo formato do `tests` de submissão; o agente sobe como `sols`
-  do calib-report) e reporta
+- **Raias na calibração (26/10/2026)**: com `MOJ_CPU_GROUPS` de G grupos, o `calibreitor.sh` roda as soluções do
+  mesmo tipo em paralelo — `_run_phase`: L = min(G, soluções) subshells (`trap - EXIT`; pinadas com `taskset -pc` no
+  grupo; reivindicam por `mkdir $TEMP.claim/<i>`) rodando `MOJ_CPU_GROUPS=<g> MOJ_PARALLEL=1 build-and-test`, com
+  barreira entre as good e pass+slow+wrong. SÓ o pai lê `$TEMP.item.<i>.out` EM ORDEM (`_item_tv`: 1ª/última linha
+  como o agente; `_exectimes` do run-trace) e calcula W/LANGOK/tabela/`sols`: log e arquivos idênticos ao serial.
+  Saíram o coproc, o FIFO, o fd 7 e o `tail -f`; no lugar do log "ao vivo", cada raia imprime `  [raia N] <solução>`
+  quando a pega (uma calibração morta no teto de wall-clock ainda diz qual rodava) e o pai põe o fim do stderr do
+  build-and-test no log quando não há veredicto (`_item_err`). `MOJ_CALIB_LANES=0` = uma raia; o agente grepa o nome
+  p/ saber se pode pedir raias. Teste: `test-calib-lanes.sh` (serial × 3 raias, pin, sobreposição, grupos vazios,
+  sem veredicto, bordas).
+- `calibreitor.sh` — calibra um problema num juiz: roda as soluções, define o **TL** pelos DOIS métodos
+  (tabela `TL[]` MOJ + `TLKATTIS[]` Kattis — ver "MÉTODOS DE TL" nas Regras), grava o
+  vetor ESTRUTURADO **`.calib-sols.json`** (por solução, `{file,lang,category,verdict,method,etl,tests:
+  [{name,code,time,tl,code_alt,tl_alt}]}` — o `tests` no formato do de submissão, UM item por teste; o agente
+  sobe como `sols` do calib-report) e reporta
   (`ensure_cached <id> [force] [full]`; `full` roda todas as soluções). **Concorrência
   (multi-slot)**: a tabela de trabalho é PRIVADA (`MOJ_TLFILE`, env que VENCE a seleção
   `tl.<host>`/`tl` no build-and-test); `tl.<host>`/`tl` finais são publicados ATÔMICOS
@@ -166,8 +186,9 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   não alcançava nenhum. O `+x` dos stubs é load-bearing (o `make check` confere no índice do
   git): o handler de `script-templates` do cdmoj copia p/ o pacote o bit **do alvo** do symlink.
 - `tl-checksum.sh` — **DOIS carimbos, um programa**. Sem flag = o ESTREITO (`tl_checksum`, o que
-  invalida o TL): `conf` (menos a linha `SAMPLE`, que não muda julgamento — filtrada por `sed`, só
-  quando existe, p/ conf sem ela e sem `\n` final dar o hash de sempre) + `tests/{input,output,score}` + `sols/good` + `scripts` (tudo que muda TL
+  invalida o TL): `conf` (menos as linhas `SAMPLE`, `FUNCTION_LANGS` e `TLMETHOD` — fora dos DOIS carimbos,
+  porque não mudam TL medido nenhum; filtradas por `sed`, só quando existem, p/ conf sem elas e sem `\n` final
+  dar o hash de sempre) + `tests/{input,output,score}` + `sols/good` + `scripts` (tudo que muda TL
   OU veredicto — `tests/score`/`output` entraram em 2026-07-19: fora do hash, um score corrigido
   nunca chegava ao juiz; mudou a cobertura? RE-STAMPE os checksums de `run/tl/*.json` em vez de
   recalibrar tudo). Com **`--all-sols`** = a VERSÃO do pacote (`pkg_version`), que soma
@@ -182,7 +203,10 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   **`public_at`** (epoch da 1ª publicação; do `.moj-meta.json` ou do seed
   `contests/treino/var/public-at-seed.json`) p/ o mapa de calor de entrada de públicos, e
   **`good_langs`** (extensões de `sols/good/*` = linguagens) p/ a gestão marcar "revisar" quando uma
-  linguagem good não tem TL calibrado (solução good que não rodou/passou em juiz nenhum).
+  linguagem good não tem TL calibrado (solução good que não rodou/passou em juiz nenhum), e o
+  **`tl_override`**/**`tl_mods`** do conf (TLOVERRIDE e TLMOD sum/mult, por sed) p/ o Painel exibir o TL
+  efetivo sem abrir pacote. O `gen-problem-json.sh` aplica os dois no `time_limits` servido com a `tl_eff`,
+  cópia LITERAL da `_TL_EFF_DEF` do cdmoj (`smoke-tl-mods.sh` de lá confere).
   **Storage MOJ-nativo (repo git local por problema):** cada problema é um repo git LOCAL em
   `MOJ_PROBLEMS_DIR/<org>/<prob>`; o servidor commita direto (`problem_commit` em `cdmoj/lib/problems.sh`,
   flock por-problema). `gen-problem-owners.sh` assina o cache de `tl_checksum` com **HEAD por
@@ -205,9 +229,35 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
 
 ## Regras
 
+- **O `conf` e o `tl` do PACOTE nunca são `source`ados em script que roda NO SERVIDOR** (incidente de
+  26/10/2026): `kattis/` (o `sidecar.sh` roda a cada create/edit/upload de problema), `gen-problem-json.sh`,
+  `gen-problem-owners.sh`, `validate-problem.sh` e o resto do que a API chama. O conf é texto do AUTOR, e um
+  `source` executa `X=$(…)` com o usuário da API — o `kt_collect` fazia isso e o fallback do
+  `gen-problem-json.sh` fazia com o `tl`. Leia por regex (`kt_conf_json` em `kattis/lib.sh`, ou o `sed` no
+  molde do `TLOVERRIDE`). No JUIZ o `source` segue (calibreitor/build-and-test: lá o autor já roda código no
+  host por desenho — `compare.sh`, `prep.sh`). Teste: `test-no-source.sh` (`make test-no-source`), com conf e
+  tl envenenados e um inventário por grep.
 - **Um renderizador só.** Mexeu no enunciado? é em `render-statement.sh` — o preview, o servido
   e a validação acompanham juntos. Não criar um pandoc paralelo.
 - Exemplos do enunciado vêm **sempre** de `tests/input|output/sample*` (na ordem), nunca do texto.
+- **MÉTODOS DE TL (26/10/2026, `tl-methods.sh`; pedido do Ribas: o do Kattis first class ao lado do MOJ).** A
+  tabela `tl.<host>` leva SEMPRE as duas metades: `TL[lang]` (MOJ, intocado: `calibrafactor × W + 0,02`) e
+  `TLKATTIS[lang]` (Kattis spec 2025-09 POR LINGUAGEM: o menor múltiplo de `KATTIS_TIME_RESOLUTION` ≥
+  `KATTIS_AC_TO_TIME_LIMIT × W`), com o MESMO `W` = pior tempo de teste AC das good; default = o menor nas duas.
+  O `declare -A TLKATTIS` vai DENTRO do arquivo (o agente faz `source` dele sob `set -u` declarando só TL/TLMOD
+  — sem isso a reportagem do TL morre). Quem escolhe a metade é o `build-and-test.sh`: `MOJ_TL_METHOD` (o JOB —
+  o servidor lê o conf ATUAL ao entregar) › `TLMETHOD` do conf › `moj`; sem `TLKATTIS` na tabela cai no MOJ e
+  diz (`TL_METHOD_WANTED` no report.env). `TLMOD` sum/mult, drift e `TLOVERRIDE` valem por cima dos dois. Na
+  fase pass/slow/wrong (`MOJ_CALIBRATING` + `MOJ_CALIB_ALT`) o b-a-t julga também pelo OUTRO método:
+  `_verdict_for <TL>` é a cadeia de decisão (TLE → RE → RE_NZEC → compare → MLE) e roda duas vezes com o
+  compare MEMOIZADO (sem subshell; o tardio grava em `-log.compare-alt`, fora do report); o veredicto
+  alternativo vai p/ `log.verdictalt` (arquivo próprio: o `log.verdictall` é sourced com só `declare -A
+  VERDICT`), e o teste roda até `max(TL do outro + drift, b × TL Kattis) + 0,5` (teto 30 s) — o veredicto
+  ativo não muda. O servidor classifica por método (`code` × `code_alt`, `cdmoj lib/calib-expect.sh`). Testes:
+  `test-calib-methods.sh` (`make test-calib`) e `kattis/test-kattis.sh` (`make test-kattis`). Formato:
+  `cdmoj/docs/PACOTE.md` "Métodos de TL". ⚠ A FAIXA dos parâmetros (`_tlm_in`) é awk, nunca `bc`: o `validate-problem.sh` a usa NO SERVIDOR, cuja
+  imagem não tem `bc` — com ele todo `KATTIS_*` explícito reprovava o pacote (27/10/2026, fotos-do-drone). É a regra
+  do `_num_in` da CLI; `test-tl-methods.sh` roda sem `bc` no PATH e compara as duas. As CONTAS seguem em `bc` (juiz).
 - **`TLOVERRIDE[<lang>|default]` no conf** (ver `cdmoj/docs/PACOTE.md`): o autor manda no TL —
   o `build-and-test.sh` o aplica DEPOIS dos `TLMOD` (override é FINAL), exceto sob
   `MOJ_CALIBRATING=1` (a calibração mede de verdade; o calibreitor exporta). O servidor lê o
