@@ -51,6 +51,8 @@ function write_report_env()
       printf 'WALLCAP=%q\n'          "${WALLCAP:-}"
       printf 'TL_CPU_SOURCE=%q\n'    "${TL_CPU_SOURCE:-}"   # cgroup (exato) | timelog (sem os filhos órfãos)
     fi
+    printf 'VERDICT_RULE=%q\n'       "${VERDICT_RULE:-worst}"   # worst | first (MOJ_VERDICT_RULE do job)
+    printf 'FIRST_FAIL=%q\n'         "${FIRST_FAIL:-}"          # o 1º teste que falhou na ordem julgada
     printf 'SMALLRESP=%q\n'          "${SMALLRESP:-}"
     printf 'FINALRESP=%q\n'          "${FINALRESP:-}"
     # veredicto CANÔNICO limpo (sem score) + score estruturado, p/ o backend casar/montar strings
@@ -563,7 +565,9 @@ function run-testinput()
   local FILE=$(basename $INPUT)
   # CAGE_CPUS (do worker, ou o grupo 0 no rerun): a jaula deste teste fica PINADA nessas CPUs
   # MOJ_CAGE_CPUSEC/MOJ_CAGE_CPUSTAT vazios (relógio de parede) = o cage-run de sempre
-  MOJ_CAGE_CPUSEC="$CPUSEC" MOJ_CAGE_CPUSTAT="${CPUSEC:+$workdirbase/$FILE-log.cpustat}" bash cage-run.sh $CAGEROOTARG $EXTRABINDINGS ${CAGE_CPUS:+-C "$CAGE_CPUS"} -d $workdir -i $INPUT -o $workdirbase/$FILE-team_output \
+  rm -f "$workdirbase/$FILE-log.memevents"   # o da execução ANTERIOR (o rerun) nunca decide esta (revisão de 10/11/2026)
+  MOJ_CAGE_CPUSEC="$CPUSEC" MOJ_CAGE_CPUSTAT="${CPUSEC:+$workdirbase/$FILE-log.cpustat}" \
+  MOJ_CAGE_MEMEVENTS="$workdirbase/$FILE-log.memevents" bash cage-run.sh $CAGEROOTARG $EXTRABINDINGS ${CAGE_CPUS:+-C "$CAGE_CPUS"} -d $workdir -i $INPUT -o $workdirbase/$FILE-team_output \
        -s $workdirbase/$FILE-stderr $SHIELDPARAMS\
        -r $LANGRUN \
        -t $workdirbase/$FILE-log.timelog\
@@ -638,11 +642,12 @@ _verdict_rc() {
   esac
 }
 # _stops <rc> — a REGRA DE PARADA (STOPWHEN_* do conf e RUNALL), a MESMA no pool paralelo e no laço final:
-# verdadeiro = depois deste teste não se roda mais nenhum.
+# verdadeiro = depois deste teste não se roda mais nenhum. O MLE (rc 9) para com o STOPWHEN_RE (09/11/2026): morrer
+# por memória é falha de execução, e até o MLE deixar de sair como RE era assim que esses testes paravam.
 _stops() {
   { (( $1 == 6 ))   && [[ "${STOPWHEN_WA:-}" == "y" ]];  } && return 0
   { (( $1 == 3 ))   && [[ "${STOPWHEN_TLE:-}" == "y" ]]; } && return 0
-  { (( $1 >= 126 )) && [[ "${STOPWHEN_RE:-}" == "y" ]];  } && return 0
+  { (( $1 >= 126 || $1 == 9 )) && [[ "${STOPWHEN_RE:-}" == "y" ]];  } && return 0
   { (( $1 != 0 ))   && [[ "$RUNALL" != "y" ]];           } && return 0
   return 1
 }
@@ -677,6 +682,24 @@ _verdict_for() {
     local RSSKB=$(grep '^res' $workdirbase/$FILE-log.timelog 2>/dev/null|awk '{print $NF}')
     if [[ "$RSSKB" =~ ^[0-9]+$ ]] && (( RSSKB > MEMLIMITMB*1024 )); then _V=MLE; fi
   fi
+  # MORTO POR MEMÓRIA = MLE, não RE (09/11/2026; LATAM: 29 envios que estouraram a memória saíram como Runtime
+  # Error). O teto duro do cgroup (max(600, MEMLIMITMB+64)) mata o programa com SIGKILL, e o exit 137 fazia a cadeia
+  # acima dizer RE. Dois sinais, nesta ordem:
+  #   1. `oom_kill` > 0 no memory.events do escopo (`-log.memevents`, gravado pelo cage-run): exato, vale até sem
+  #      MEMLIMITMB (o teto de 600 MB também é limite de memória) e vale para QUALQUER veredicto menos o TLE — com
+  #      OOMPolicy=continue um programa de vários processos pode ter um filho morto por memória e ainda terminar
+  #      (AC/WA): o conjunto passou do teto;
+  #   2. sem esse arquivo (root/cgroup v1, sem user manager): o RSS medido acima do MEMLIMITMB num teste que morreu.
+  # O TLE fica: estourou o tempo antes.
+  if [[ "$_V" != TLE && "$_V" != MLE ]]; then
+    local _OOMK; _OOMK="$(awk '$1 == "oom_kill" { print $2; exit }' "$workdirbase/$FILE-log.memevents" 2>/dev/null)"
+    if [[ "$_OOMK" =~ ^[0-9]+$ ]] && (( _OOMK > 0 )); then
+      _V=MLE
+    elif [[ -n "${MEMLIMITMB:-}" && ( "$_V" == RE || "$_V" == RE_NZEC ) ]]; then
+      local _RSSKB; _RSSKB="$(grep '^res' "$workdirbase/$FILE-log.timelog" 2>/dev/null | awk '{print $NF}')"
+      [[ "$_RSSKB" =~ ^[0-9]+$ ]] && (( _RSSKB > MEMLIMITMB*1024 )) && _V=MLE
+    fi
+  fi
 }
 
 # POOL DE P WORKERS sobre a fila de testes (24/09/2026; antes: `run-testinput &` + `wait -n`).
@@ -695,6 +718,27 @@ for INPUT in $PROBLEMTEMPLATEDIR/tests/input/*; do
   fi
   TESTS+=("$INPUT")
 done
+# REGRA DO VEREDICTO (09/11/2026; opção por contest, o job a traz em MOJ_VERDICT_RULE — o agente a repassa):
+#   worst (padrão, o de sempre) = o veredicto mais GRAVE entre os testes (VERDICTORDER abaixo);
+#   first = o do 1º teste que falhou NA ORDEM CANÔNICA: os exemplos (tests/input/sample*, a mesma seleção do
+#           enunciado) primeiro, depois o resto; dentro de cada parte, ordem de nome NATURAL (LC_ALL=C sort -V:
+#           2 antes de 10). É a regra do ICPC/BOCA: o time vê o erro do 1º teste em que errou.
+# Só no `first` a fila muda de ordem (pool E laço final): no worst a ordem do glob decide em que teste o STOPWHEN
+# para e, portanto, o "Xp" — o treino e as provas de antes não mudam nada.
+VERDICT_RULE=worst; FIRST_FAIL=""; FIRST_FAIL_VERDICT=""
+if [[ "${MOJ_VERDICT_RULE:-}" == first ]]; then
+  VERDICT_RULE=first
+  _TESTS0=("${TESTS[@]}")
+  mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]}" | LC_ALL=C awk -F/ '{ print ($NF ~ /^sample/ ? 0 : 1) "\t" $NF "\t" $0 }' \
+                         | LC_ALL=C sort -t $'\t' -k1,1n -k2,2V | cut -f3-)
+  # o reordenamento não saiu completo (fork/EAGAIN sob carga, sort quebrado): vale a ordem de antes — a fila tem
+  # sempre todos os testes, e a regra continua "o 1º que falhou".
+  if (( ${#TESTS[@]} != ${#_TESTS0[@]} )); then
+    TESTS=("${_TESTS0[@]}")
+    LOG "  - Verdict rule: could not sort the tests; keeping the default order"
+  fi
+  LOG "  - Verdict rule: the FIRST failing test (samples first, then natural name order)"
+fi
 mkdir -p "$workdirbase/.claim"
 BAT_PID=$$; export BAT_PID
 _release_group() {  # anota em MOJ_RELEASE_FILE que o grupo $1 acabou (append-only; o agente dedupa)
@@ -730,6 +774,31 @@ fi
 CAGE_CPUS="${CPU_GROUPS[0]:-}"
 
 TLERERUN=${TLERERUN:=y}
+# RERUN SÓ DO TLE PERTO DO TL (10/11/2026; bancada de 06–07/11: vizinhos pesados em memória no mesmo soquete
+# inflam o tempo em até +64%, e uma solução correta perto do TL vira TLE por azar). O TLE cujo tempo cobrado ficou
+# até TLERERUN_BAND × (TL + drift) roda de novo, em série no grupo 0, e o resultado do rerun é o que vale — o time não
+# vê nada além do veredicto (silencioso). O TLE LONGE (laço infinito, morto no ETL, ou morto pela PAREDE no cpu) não
+# repete mais: não é interferência, e o rerun custava o ETL inteiro de novo. Sem tempo medido = repete (o de sempre).
+# O 1º rerun que CONFIRMA o TLE desliga os seguintes (TLERERUN=n), como antes: o custo fica limitado.
+# Padrão 2,0; conf `TLERERUN_BAND=<x>` (número > 1) ou env `MOJ_TLE_RERUN_BAND` (vence) — inválido = 2,0.
+TLERERUN_BAND="${MOJ_TLE_RERUN_BAND:-${TLERERUN_BAND:-2.0}}"
+[[ "$TLERERUN_BAND" =~ ^[0-9]+\.?[0-9]*$ ]] && LC_ALL=C awk -v b="$TLERERUN_BAND" 'BEGIN{exit !(b > 1)}' || TLERERUN_BAND=2.0
+# _tle_near <teste> -> rc 0 se o TLE desse teste ficou perto do TL (vale repetir). Usa o tempo cobrado (_judged_time).
+# "Perto" = até TLERERUN_BAND × (TL + drift), e NUNCA menos que TL + drift + 1 s: o TL mínimo da calibração é 0,0335 s
+# (1,35 × 0,01 + 0,02 — mais da metade dos TLs de C/C++), e só o múltiplo dava 0,07 s; um soluço de 80 ms (cache frio,
+# vizinho) virava TLE definitivo, que o rerun de antes salvava (revisão de 10/11/2026). O morto no TETO (tempo ≥ ETL −
+# 0,05: laço infinito, o SIGXCPU no relógio de CPU) nunca é perto, qualquer que seja o TL.
+_tle_near() {
+  local _JT="" _WALLKILL=0 _CPUSRC=""
+  _judged_time "$1"
+  (( _WALLKILL )) && return 1
+  [[ "$_JT" =~ ^[0-9]+\.?[0-9]*$ ]] || return 0
+  LC_ALL=C awk -v t="$_JT" -v tl="${TL[$LANGUAGE]:-0}" -v d="${TLDRIFT:-0}" -v b="$TLERERUN_BAND" -v e="${ETL:-0}" \
+    'BEGIN{ if (tl + 0 <= 0) exit 0
+            if (e + 0 > 0 && t + 0 >= e - 0.05) exit 1
+            lim = b * (tl + d); f = tl + d + 1.0; if (f > lim) lim = f
+            exit !(t + 0 <= lim) }'
+}
 
 declare -A VERDICT
 [[ -e $workdirbase/log.verdictall ]] && source $workdirbase/log.verdictall
@@ -754,13 +823,9 @@ SMALLRESP=AC
 # que o pool não rodou roda AQUI, em série no grupo 0, sem rerun de TLE (a execução serial é a referência).
 STOPPED=0
 NOTTESTED=()
-for INPUT in $PROBLEMTEMPLATEDIR/tests/input/*; do
+# a MESMA fila do pool (TESTS, já validada lá): no worst é a ordem do glob de sempre; no first, a canônica
+for INPUT in "${TESTS[@]}"; do
   LOG "--------------------------------------------------------------------"
-  if [[ ! -e "$INPUT" ]]; then
-    echo "Wrong package format. No input found"
-    LOG "$INPUT not found"
-    exit 3
-  fi
   FILE=$(basename $INPUT)
   LOG ""
   LOG "## Testfile: $FILE"
@@ -783,8 +848,10 @@ for INPUT in $PROBLEMTEMPLATEDIR/tests/input/*; do
   fi
 
   if [[ "$THISVERDICT" == "TLE" && $THISRERUN -eq 0 ]]; then
-    if [[ "$TLERERUN" == "y" ]]; then
-	    LOG " - Rerun: because got TLE while running parallel tests"
+    if [[ "$TLERERUN" == "y" ]] && ! _tle_near "$FILE"; then
+	    LOG " - Rerun: not needed — this TLE is far from the time limit (over ${TLERERUN_BAND}x, or killed at the wall cap)"
+    elif [[ "$TLERERUN" == "y" ]]; then
+	    LOG " - Rerun: because got TLE near the time limit (within ${TLERERUN_BAND}x)"
 	    run-testinput $INPUT
 	    THISRERUN=1
       source $workdirbase/log.verdictall
@@ -840,7 +907,13 @@ for INPUT in $PROBLEMTEMPLATEDIR/tests/input/*; do
   #LOG "THISVERDICT=$THISVERDICT"
   #LOG "${VERDICTORDER[$SMALLRESP]} , ${VERDICTORDER[$THISVERDICT]}"
   (( ${VERDICTORDER[$SMALLRESP]} < ${VERDICTORDER[$THISVERDICT]} )) && SMALLRESP=$THISVERDICT
+  [[ -z "$FIRST_FAIL" && ! "$THISVERDICT" =~ "AC" ]] && { FIRST_FAIL="$FILE"; FIRST_FAIL_VERDICT="$THISVERDICT"; }
 done
+# regra first: vale o 1º que falhou na ordem (o pior segue no log, p/ quem audita)
+if [[ "$VERDICT_RULE" == first && -n "$FIRST_FAIL" ]]; then
+  [[ "$SMALLRESP" != "$FIRST_FAIL_VERDICT" ]] && LOG "  - Verdict rule first: $FIRST_FAIL_VERDICT (test $FIRST_FAIL) instead of the most severe, $SMALLRESP"
+  SMALLRESP="$FIRST_FAIL_VERDICT"
+fi
 
 [[ "$SMALLRESP" =~ "AC" ]] && (( RESPERRO > 0 )) && SMALLRESP=UE
 

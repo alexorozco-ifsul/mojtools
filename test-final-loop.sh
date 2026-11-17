@@ -11,7 +11,8 @@
 #
 # Roda o build-and-test.sh REAL (com score-summary.sh e gen-report.sh reais) numa cópia do mojtools com um
 # cage-run.sh FALSO que decide pelo NOME do teste:
-#   xtle = real 9 s (TLE sempre) · xflk = TLE só na 1ª execução, AC depois (o teste "instável") · xwa = WA
+#   xtle = real 9 s (TLE LONGE do TL de 1 s, sempre) · xslow = real 1,5 s (TLE PERTO, sempre) · xflk = 1,3 s só na 1ª
+#   execução, AC depois (o teste "instável", a interferência) · xwa = WA
 # Cada execução é anotada em $RUNLOG. Sem jaula, sem rede. `make test-final-loop`.
 set -u
 MT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -33,7 +34,10 @@ if [[ -n "$RW" && -z "$IN" ]]; then echo "BIN=sol" > "$OUT"; : > "$TLOG"; exit 0
 name="$(basename "$IN")"; real=0.05
 echo "$name" >> "$RUNLOG"
 [[ "$name" == *xtle* ]] && real=9
-if [[ "$name" == *xflk* && ! -e "$FLAKY/$name" ]]; then : > "$FLAKY/$name"; real=9; fi
+[[ "$name" == *xslow* ]] && real=1.5
+if [[ "$name" == *xflk* && ! -e "$FLAKY/$name" ]]; then : > "$FLAKY/$name"; real=1.3; fi
+if [[ "$name" == *xfar* && ! -e "$FLAKY/$name" ]]; then : > "$FLAKY/$name"; real=2.5; fi   # 2,5× o TL de 1 s, só na 1ª
+if [[ "$name" == *xjit* ]]; then if [[ ! -e "$FLAKY/$name" ]]; then : > "$FLAKY/$name"; real=0.08; else real=0.01; fi; fi  # soluço de 80 ms na 1ª, 10 ms depois
 if [[ "$name" == *xwa* ]]; then echo errado > "$OUT"; else cat "$IN" > "$OUT"; fi
 printf 'real %s\nuser 0\nsys 0\nres 100\ncpu 99%%\n' "$real" > "$TLOG"
 exit 0
@@ -56,8 +60,8 @@ run(){
   local ra="$1"; shift
   local out; out="$(cd "$H" && env MOJ_PARALLEL=1 "$@" bash build-and-test.sh c "$W/sol.c" "$P" "$ra" 2>/dev/null)"
   WB="$(head -n1 <<<"$out")"; FIN="$(tail -n1 <<<"$out")"; TR="$WB/run-trace.log"
-  VC=""; SC=""; SR=""
-  [[ -f "$WB/report.env" ]] && eval "$( source "$WB/report.env"; printf 'VC=%q SC=%q SR=%q\n' "$VERDICT_CANON" "$SCORE" "$SMALLRESP" )"
+  VC=""; SC=""; SR=""; VR=""; FF=""
+  [[ -f "$WB/report.env" ]] && eval "$( source "$WB/report.env"; printf 'VC=%q SC=%q SR=%q VR=%q FF=%q\n' "$VERDICT_CANON" "$SCORE" "$SMALLRESP" "${VERDICT_RULE:-}" "${FIRST_FAIL:-}" )"
   DBG="FIN=$FIN | VC=$VC SC=$SC SR=$SR | runs: $(tr '\n' ' ' < "$RUNLOG")"
 }
 runs(){ grep -cx "$1" "$RUNLOG"; }
@@ -81,7 +85,7 @@ echo "== parada CONFIRMADA (STOPWHEN_TLE): a cauda NÃO roda; sem linha vazia ne
 mkpkg "" "STOPWHEN_TLE=y" t1 t2xtle t3 t4
 run y
 ck "Time Limit Exceeded"                              '[[ "$FIN" == "Time Limit Exceeded,25p" && "$SR" == TLE ]]'
-ck "t3 e t4 nunca rodaram; t2xtle: pool + rerun"     '[[ "$(runs t3)" == 0 && "$(runs t4)" == 0 && "$(runs t2xtle)" == 2 ]]'
+ck "t3 e t4 nunca rodaram; t2xtle (LONGE): sem rerun" '[[ "$(runs t3)" == 0 && "$(runs t4)" == 0 && "$(runs t2xtle)" == 1 ]]'
 ck "o trace diz por que não rodaram"                  '[[ "$(grep -c "not run: a previous test stopped the run" "$TR")" == 2 ]]'
 ck "sem EXECTIME vazio e sem bad array subscript"     'clean_trace'
 
@@ -105,6 +109,60 @@ ck "t3 e t4 rodaram uma vez e têm EXECTIME com tempo" '[[ "$(runs t3)" == 1 && 
 mkpkg "" "" t1 t2xtle t3
 run n
 ck "RUNALL≠y com TLE confirmado: a cauda não roda"   '[[ "$FIN" == "Time Limit Exceeded,33p" && "$(runs t3)" == 0 ]] && clean_trace'
+
+echo "== RERUN SÓ DO TLE PERTO DO TL (10/11/2026: TLERERUN_BAND, padrão 2×) =="
+mkpkg "" "" t1 t2xslow t3xslow t4
+run y
+ck "TLE perto confirmado: rerun UMA vez, o 2º perto não repete" '[[ "$SR" == TLE && "$(runs t2xslow)" == 2 && "$(runs t3xslow)" == 1 ]]'
+ck "o trace diz por que repetiu"                      'grep -q "Rerun: because got TLE near the time limit (within 2.0x)" "$TR"'
+mkpkg "" "" t1 t2xtle t3xflk
+run y
+ck "TLE longe não repete e NÃO gasta o rerun: o instável depois passa" '[[ "$(runs t2xtle)" == 1 && "$(runs t3xflk)" == 2 ]] && grep -q "EXECTIME t3xflk 0.05 AC" "$TR"'
+ck "o trace diz que o longe não repetiu"              'grep -q "Rerun: not needed — this TLE is far from the time limit" "$TR"'
+mkpkg "" "" t1 t2xfar
+run y
+ck "2,5 s com TL de 1 s (além de 2× e do piso de TL+1 s): longe, TLE" '[[ "$SR" == TLE && "$(runs t2xfar)" == 1 ]]'
+mkpkg "" "TLERERUN_BAND=3" t1 t2xfar
+run y
+ck "TLERERUN_BAND=3 no conf: o de 2,5 s fica perto e passa" '[[ "$SR" == AC && "$(runs t2xfar)" == 2 ]]'
+mkpkg "" "TLERERUN_BAND=1.5" t1 t2xfar
+run y MOJ_TLE_RERUN_BAND=3
+ck "MOJ_TLE_RERUN_BAND vence o conf"                  '[[ "$SR" == AC && "$(runs t2xfar)" == 2 ]]'
+mkpkg "" "TLERERUN_BAND=abc" t1 t2xfar
+run y
+ck "banda inválida = 2,0"                             '[[ "$SR" == TLE && "$(runs t2xfar)" == 1 ]] && clean_trace'
+# o caso da revisão: o TL mínimo da calibração (0,0335 s, metade dos TLs de C/C++) e um soluço de 80 ms
+mkpkg "" "" t2xjit; printf 'TL[c]=.0335\nTL[default]=.0335\n' > "$P/tl"
+run y
+ck "TL de 0,0335 s com soluço de 80 ms: o piso de TL+1 s repete e passa" '[[ "$SR" == AC && "$(runs t2xjit)" == 2 ]]'
+mkpkg "" "" t1 t2xtle; printf 'TL[c]=3\nTL[default]=3\n' > "$P/tl"
+run y
+ck "laço infinito com TL de 3 s (morto no teto, ETL ≤ 2×TL): não repete" '[[ "$SR" == TLE && "$(runs t2xtle)" == 1 ]]'
+
+echo "== REGRA DO VEREDICTO (MOJ_VERDICT_RULE, opção do contest): worst × first =="
+mkpkg "" "" t1 t2xwa t3xtle
+run y
+ck "sem a regra = o mais grave (TLE), como sempre"   '[[ "$SR" == TLE && "$VR" == worst ]]'
+run y MOJ_VERDICT_RULE=first
+ck "first = o do 1º que falhou (WA do t2)"            '[[ "$FIN" == "Wrong Answer,33p" && "$SR" == WA && "$VR" == first && "$FF" == t2xwa ]]'
+ck "o trace diz qual seria o mais grave"              'grep -q "Verdict rule first: WA (test t2xwa) instead of the most severe, TLE" "$TR"'
+ck "o report diz o teste"                             'grep -q "veredicto do 1º teste que falhou: t2xwa" "$WB/report.html"'
+mkpkg "" "" a1xtle sample1xwa
+run y MOJ_VERDICT_RULE=first
+ck "os EXEMPLOS vêm primeiro (sample1 antes de a1)"   '[[ "$SR" == WA && "$FF" == sample1xwa ]]'
+ck "e rodam primeiro"                                 '[[ "$(head -n1 "$RUNLOG")" == sample1xwa ]]'
+mkpkg "" "" t2xwa t10xtle
+run y MOJ_VERDICT_RULE=first
+ck "ordem NATURAL do nome (t2 antes de t10)"          '[[ "$SR" == WA && "$FF" == t2xwa ]]'
+mkpkg "" "STOPWHEN_TLE=y" t1 t2xtle t10xwa
+run y MOJ_VERDICT_RULE=first
+ck "com STOPWHEN: para no 1º (TLE), t10 nem roda"     '[[ "$SR" == TLE && "$FF" == t2xtle && "$(runs t10xwa)" == 0 ]] && clean_trace'
+mkpkg "" "" t1 t2
+run y MOJ_VERDICT_RULE=first
+ck "tudo certo continua Accepted"                     '[[ "$FIN" == "Accepted,100p" && -z "$FF" ]]'
+mkpkg $'g1_* - 40 pontos\ng2_* - 60 pontos' "" g1_a g2_axtle g2_bxwa
+run y MOJ_VERDICT_RULE=first
+ck "com grupos: a nota é a mesma, o veredicto é o 1º" '[[ "$VC" == "Time Limit Exceeded" && "$SC" == 40 && "$FF" == g2_axtle ]]'
 
 echo; echo "RESULT: $pass passed, $fail failed"
 (( fail == 0 ))

@@ -89,6 +89,17 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   (mktemp+mv) e `.calib-reports/` troca por rename no fim — outro slot julgando o mesmo
   problema nunca vê placeholder/tabela parcial. Nunca reintroduzir escrita direta no
   diretório compartilhado do pacote durante a calibração (raiz de veredicto errado).
+- **Calibração INCREMENTAL (10/11/2026, opt-in)** no `calibreitor.sh`: com `MOJ_CALIB_MEMO_DIR` (o agente passa
+  `<cache>/<id>/calib-memo`) toda solução rodada grava o retrato do workdir (`_memo_save`: verdictall/alt, report.env/
+  html, `<teste>-log.{exectime,timelog,wallkill}`, as linhas EXECTIME/WALLTIME do trace); com `MOJ_CALIB_REUSE=1` a raia
+  restaura o da MESMA chave (`_memo_restore`, workdir novo + `$TEMP.item.<i>.out`) e o pai segue igual. Revisão de 10/11:
+  a chave leva a impressão do toolchain (`_memo_toolchain`), falha de ambiente não é salva, e os retratos moram em
+  `<dir>/<contexto>/` (o contexto velho sai na largada). Chave
+  (`_memo_key`): `tl-checksum.sh --context` (o estreito SEM `sols/`) + o código VERSIONADO do mojtools (`git ls-files`;
+  sem git, `find`) + `MOJ_TEST_CPUS` + `CAGE_ROOT` + host + categoria + runall + nome e conteúdo da solução + (fora as
+  good) a tabela de TL das good sem a linha da data + `MOJ_CALIB_ALT`. TTL `MOJ_CALIB_MEMO_TTL_DAYS` (14). O `sols`
+  leva `reused_at`; o log diz "reaproveitado (medido em …)" e o resumo conta. Teste: `test-calib-memo.sh`
+  (`make test-calib-memo`).
 - `statement-langs.sh` (sourceável) — **FONTE ÚNICA dos idiomas do enunciado** (2026-09-15):
   `stmt_langs_all` (pt en es), `stmt_file <pkg> <lang>` (PT = enunciado.{md,org,tex}; outro =
   `docs/enunciado.<lang>.md`), `stmt_langs_of`, `stmt_note_file` (nota do idioma › PT),
@@ -296,6 +307,20 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   literal está no `gen-problem-json.sh`, que serve `tl_unified`). O import Kattis NATIVO liga `TLUNIFIED=y` (decisão do
   Ribas); a ida e volta preserva. `conf_tlunified_sane` (y|n). Testes: `test-calib-methods.sh`, `test-tl-methods.sh`,
   `kattis/test-kattis.sh`.
+- **REGRA DO VEREDICTO (09/11/2026; opção do CONTEST, decisão do Ribas pós-LATAM).** `MOJ_VERDICT_RULE` (o job traz
+  `verdict_rule`, o agente repassa): `worst` (padrão; treino, contests antigos, calibração) = o teste mais grave;
+  `first` = o do 1º teste que falhou na ordem canônica — `tests/input/sample*` primeiro, depois o resto, cada parte em
+  `LC_ALL=C sort -V` (natural: t2 antes de t10). Só no `first` o `TESTS` (pool E laço final) é reordenado: no `worst` a
+  ordem do glob decide onde o STOPWHEN para e o `Xp` — mudar isso mexeria em prova antiga. `report.env`:
+  `VERDICT_RULE`, `FIRST_FAIL`; o report o mostra no banner. Com grupos e SEM `STOPWHEN_*` a nota não muda (o
+  `score-summary.sh` lê o `SMALLRESP`); com STOPWHEN a parada cai em outro teste e a nota pode mudar (o contest novo
+  só nasce `first` no icpc — cdmoj `cc_settings_conf_lines`). Teste: `test-final-loop.sh`.
+- **RERUN SÓ DO TLE PERTO DO TL (10/11/2026; interferência de memória medida até ~1,6×).** No laço final, o TLE com
+  tempo cobrado ≤ max(`TLERERUN_BAND` × (TL + drift), TL + drift + 1 s) e abaixo do teto ETL roda de novo em série (`_tle_near`;
+o piso de 1 s é da revisão de 10/11: com TL de 0,0335 s o múltiplo sozinho não salvava um soluço de 80 ms; padrão 2,0, conf ou env
+  `MOJ_TLE_RERUN_BAND`, inválido = 2,0) e o rerun vale; o longe (e a morte pela parede) não repete. O 1º rerun que
+  confirma desliga os seguintes (`TLERERUN=n`), como antes. `conf_tlererun_sane` (HARD, awk). Testes:
+  `test-final-loop.sh` (xslow/xflk/xtle), `test-calib-methods.sh`.
 - **`TLOVERRIDE[<lang>|default]` no conf** (ver `cdmoj/docs/PACOTE.md`): o autor manda no TL —
   o `build-and-test.sh` o aplica DEPOIS dos `TLMOD` (override é FINAL), exceto sob
   `MOJ_CALIBRATING=1` (a calibração mede de verdade; o calibreitor exporta). O servidor lê o
@@ -305,6 +330,10 @@ cada comando + contrato de `lang/<lang>/`. **Formato do pacote: `cdmoj/docs/PACO
   o canal p/ dentro da jaula); cgroup duro = `max(600, MEMLIMITMB+64)` (root e sem root). Stack:
   **default 128MB p/ todas as linguagens** (`ULIMITS[-s]=131072`, herdado através do bwrap);
   override por conf `STACKLIMITMB=<MB>` (vence) ou `ULIMITS[-s]=<KB>`; a JVM espelha em `-Xss`.
+  **Morte pelo teto do cgroup = MLE (09/11/2026)**: o escopo roda com `OOMPolicy=continue` (com `stop` o systemd
+  matava o `time` e o wrapper junto e saía RE); o wrapper grava o `memory.events` (`MOJ_CAGE_MEMEVENTS` →
+  `<teste>-log.memevents`) e o `_verdict_for` dá MLE a todo teste com `oom_kill` > 0 (até AC/WA: filho morto, principal
+  terminou) e, sem o arquivo, ao teste morto com RSS acima do MEMLIMITMB; TLE vence; o MLE para com `STOPWHEN_RE`. Teste: `test-mle-oom.sh`.
 - `lang/<lang>/run.sh`: mesmo contrato p/ toda linguagem aceita. O tempo-limite de **compilação**
   é 30s por default; linguagem de compilador lento sobe via arquivo **`lang/<lang>/compile-tl`**
   (segundos; o problema pode sobrescrever com `scripts/<lang>/compile-tl`) — ex.: `kt` (Kotlin,
