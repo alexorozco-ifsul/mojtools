@@ -520,6 +520,20 @@ do juiz) e **`MOJ_CALIB_ALT`** (com `MOJ_CALIBRATING`: julga também pelo outro 
 usado), `TL_METHOD_WANTED` (o pedido, quando a tabela não tinha a metade Kattis e o julgamento caiu no MOJ),
 `ETL` (o teto de cada teste) e, na calibração, `TL_METHOD_ALT`/`TL_LANG_ALT`.
 
+**Morte por memória = MLE** (09/11/2026). O teto duro do cgroup do teste (`max(600, MEMLIMITMB+64)` MB) mata o
+programa com SIGKILL. O escopo do systemd roda com `OOMPolicy=continue`: o kernel mata só o programa e o resto da
+jaula termina normalmente. O cage-run grava o `memory.events` do escopo em `<teste>-log.memevents` (via
+`MOJ_CAGE_MEMEVENTS`). O veredicto do teste é:
+
+- `MLE`, quando o `oom_kill` do `memory.events` é maior que 0, qualquer que seja o resto (menos TLE): um programa
+  de vários processos pode ter um filho morto por memória e ainda terminar. Vale mesmo sem `MEMLIMITMB`;
+- `MLE`, quando o teste morreu, não há `memory.events` (juiz root, ou sem user manager) e o RSS medido passou do
+  `MEMLIMITMB`;
+- `TLE`, quando o tempo estourou antes: o TLE vence;
+- `MLE`, como sempre, quando o teste terminou com RSS acima do `MEMLIMITMB`.
+
+Com `STOPWHEN_RE=y`, o MLE também interrompe a execução. Teste: `test-mle-oom.sh` (`make test-mle`).
+
 **Relógio do TL** (05/11/2026; `TLCLOCK=cpu` no conf, o padrão é `wall`). No `wall` tudo é como sempre: o tempo é
 o `real` do timelog de dentro da jaula e o teto é `ETL = TL + 2,2 + 2·drift`. No `cpu`:
 
@@ -572,6 +586,39 @@ finais (depois do rerun serial de TLE). Se o teste que parou o pool passa no rer
 Com uma falha confirmada, eles não rodam, e um grupo de `tests/score` com teste que não rodou não pontua.
 Antes, a parada espúria dava "Unknown ERROR" e, com grupos, um "Accepted" falso. Teste: `make
 test-final-loop`.
+
+**Calibração incremental (10/11/2026, opt-in).** Com `MOJ_CALIB_MEMO_DIR=<dir>` o `calibreitor.sh` guarda um retrato do
+resultado de cada solução; com `MOJ_CALIB_REUSE=1` ele reaproveita o retrato da solução cuja chave não mudou, em vez de
+rodá-la. A chave cobre o contexto de julgamento (`tl-checksum.sh --context`: conf, testes, scripts), o código do
+mojtools, a largura, a jaula, o host, a solução e — para pass/slow/wrong — a tabela de TL que saiu das good. Uma
+solução nova roda sozinha; uma good editada (W novo) faz a fase 2 inteira rodar; conf ou teste mudado roda tudo.
+Retratos com mais de `MOJ_CALIB_MEMO_TTL_DAYS` (14) não valem. A chave leva também a impressão do toolchain da jaula
+(`os-release` e os compiladores), falha de ambiente (Compilation Error, Judge Error, linguagem indisponível) nunca vai ao
+memo, e os retratos ficam num subdiretório por contexto — o de contexto velho sai na calibração seguinte. O agente do juiz passa o diretório sempre e o reuse só
+quando o autor pede (`moj calibrate --reuse`, ☐ ♻ no editor). Teste: `make test-calib-memo`.
+
+**Rerun só do TLE perto do TL (10/11/2026).** O rerun serial vale para o TLE cujo tempo cobrado ficou até
+`TLERERUN_BAND` × (TL + tolerância), e nunca menos que TL + tolerância + 1 s (o piso: com o TL mínimo da calibração,
+0,0335 s, o múltiplo sozinho dava 0,07 s e um soluço de 80 ms virava TLE) — padrão 2,0; conf `TLERERUN_BAND=<x>` (número > 1, o `validate-problem.sh`
+reprova outro valor) ou env `MOJ_TLE_RERUN_BAND`, que vence. Vizinhos pesados em memória no mesmo soquete inflam o
+tempo em até ~1,6× (bancada de 06–07/11): a solução correta perto do TL vira TLE por azar e passa no rerun. O TLE
+longe (laço infinito, morto no teto ETL — conferido pelo tempo, qualquer que seja o TL —, ou morto pela parede no
+`TLCLOCK=cpu`) não repete mais — custava o ETL inteiro de
+novo. O 1º rerun que confirma o TLE desliga os seguintes, como antes. O trace diz qual foi o caso. Teste: `make
+test-final-loop`.
+
+**Regra do veredicto (09/11/2026).** É uma opção do CONTEST, não do pacote: o job a traz e o agente do juiz a
+passa em `MOJ_VERDICT_RULE`.
+- `worst` (o padrão; treino e provas antigas): o veredicto é o do teste mais grave (`VERDICTORDER`).
+- `first`: o veredicto é o do **1º teste que falhou** na ordem canônica — os exemplos (`tests/input/sample*`)
+  primeiro, depois o resto, cada parte em ordem natural de nome (`LC_ALL=C sort -V`: `t2` antes de `t10`). O pool
+  e o laço final usam essa ordem, então com `STOPWHEN_*` a execução para no 1º erro dessa ordem. Com grupos e
+  sem `STOPWHEN_*`, a nota não muda, só o veredicto. Com `STOPWHEN_*` a parada cai em outro teste, e os grupos que
+  não rodaram ficam zerados: a nota pode mudar. Por isso o contest novo só nasce `first` no modo icpc.
+
+Só no `first` a ordem dos testes muda. No `worst`, a ordem do glob decide em que teste o `STOPWHEN` para (e o
+`Xp`), e isso fica como sempre foi. O `report.env` leva `VERDICT_RULE` e `FIRST_FAIL` (o 1º teste que falhou), e
+o report mostra o teste no cabeçalho. A calibração não passa a variável (`worst`). Teste: `make test-final-loop`.
 
 Lê do `conf` do problema: todas as chaves de limite (ver `cdmoj/docs/PACOTE.md`).
 
@@ -842,8 +889,8 @@ Não é um comando: é um trecho que o `build-and-test.sh` carrega sozinho quand
 `tests/score` (e não tem um `scripts/summary.sh` próprio). Interpreta os grupos, aplica o tudo ou nada
 por grupo, soma os pesos e reescreve o veredito com a nota.
 
-O veredito é o do **pior teste**, como no problema sem grupos (a mesma conta do `build-and-test.sh`:
-`SMALLRESP` → `VERDICT_CANON`); os grupos decidem só a nota. A última linha fica
+O veredito é o do **pior teste** (ou o do 1º que falhou, com a regra `first` do contest), como no problema sem
+grupos (a mesma conta do `build-and-test.sh`: `SMALLRESP` → `VERDICT_CANON`); os grupos decidem só a nota. A última linha fica
 `<veredito canônico>,<pontos>p. Pontos | <por grupo> | [quantitativos <código>(<n>) …]`:
 
 | Situação | Última linha (exemplo) |
